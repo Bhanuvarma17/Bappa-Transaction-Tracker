@@ -7,9 +7,11 @@ import { createServer as createViteServer } from "vite";
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
+
 app.use(express.json({ limit: "5mb" }));
 
 // --- PERSISTENT STORAGE SETUP ---
+
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
 const STORE_FILE = path.join(DATA_DIR, "store.json");
 
@@ -76,21 +78,29 @@ function ensureDataDir() {
 
 function loadDatabase() {
   ensureDataDir();
-  if (fs.existsSync(STORE_FILE)) {
-  try {
-    const data = fs.readFileSync(STORE_FILE, "utf-8");
-    db = JSON.parse(data);
-    console.log(
-      `Database loaded: ${db.users.length} users, ${db.profiles.length} profiles, ${db.expenses.length} expenses.`
-    );
-    return;
-  } catch (err) {
-    console.error("Failed to parse store.json, initializing empty database:", err);
-  }
-}
 
-console.log("No database found. Starting with an empty database.");
-saveDatabase();
+  if (fs.existsSync(STORE_FILE)) {
+    try {
+      const data = fs.readFileSync(STORE_FILE, "utf-8");
+      db = JSON.parse(data);
+
+      console.log(
+        `Database loaded: ${db.users.length} users, ${db.profiles.length} profiles, ${db.expenses.length} expenses.`
+      );
+
+      return;
+    } catch (err) {
+      console.error(
+        "Failed to parse store.json, initializing empty database:",
+        err
+      );
+    }
+  }
+
+  console.log("No database found. Starting with an empty database.");
+
+  seedDefaultData();
+  saveDatabase();
 }
 
 function saveDatabase() {
@@ -115,6 +125,20 @@ function verifyPassword(password: string, hash: string, salt: string): boolean {
   const computedHash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
   return computedHash === hash;
 }
+
+
+
+function seedDefaultData() {
+  const user1Id = "user_sbvmb_youth";
+  const { hash: h1, salt: s1 } = hashPassword("sbvmb123");
+  db.users.push({
+    id: user1Id,
+    email: "sbvmb@ganeshutsav.org",
+    passwordHash: h1,
+    passwordSalt: s1,
+    createdAt: new Date().toISOString()
+  });
+
 
   db.profiles.push({
     userId: user1Id,
