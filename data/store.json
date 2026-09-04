@@ -1,0 +1,154 @@
+{
+  "users": [
+    {
+      "id": "user_sbvmb_youth",
+      "email": "sbvmb@ganeshutsav.org",
+      "passwordHash": "19e8d5f6afa965835f84e88bac32527fbdabe36887663b3369fbcb5603ef2e00a1e03bfb3e2838ef9a8960f71eae94704b7ad4a677209c96c6efe7029a6017d3",
+      "passwordSalt": "ba43d817683fbdeb35ea554607e2226b",
+      "createdAt": "2026-09-04T13:02:33.224Z"
+    },
+    {
+      "id": "user_44f09351-022d-4b88-a45c-a9abcdc45bec",
+      "email": "balaji@colony.org",
+      "passwordHash": "9c296770d5615e7581685695ff9dbc3e54cbb496cc7f8acd2e493c71296c695ab5bd2b2b33c9af301a722c08556211d549b3ddc48e7fd6d45c0402a27e22bdb5",
+      "passwordSalt": "d6417eee85ed576f8c8fec5ab2da3510",
+      "createdAt": "2026-09-04T13:02:41.882Z"
+    }
+  ],
+  "profiles": [
+    {
+      "userId": "user_sbvmb_youth",
+      "username": "SBVMB Youth",
+      "normalizedUsername": "sbvmb youth",
+      "displayName": "SBVMB Youth Ganesh Utsav Committee",
+      "bio": "Grand 11-Day Vinayaka Chavithi celebrations at Main Bazar. Join us for daily grand aarti, cultural events & laddoo auction.",
+      "profileImage": "https://images.unsplash.com/photo-1567591414240-e14f6b1eefb5?w=400&auto=format&fit=crop&q=80",
+      "capital": 125000,
+      "currency": "₹",
+      "updatedAt": "2026-09-04T13:02:33.224Z"
+    },
+    {
+      "userId": "user_44f09351-022d-4b88-a45c-a9abcdc45bec",
+      "username": "Balaji Colony Youth",
+      "normalizedUsername": "balaji colony youth",
+      "displayName": "Balaji Colony Ganesh Utsav Samithi",
+      "bio": "Vinayaka Chavithi celebration committee finances and expense records.",
+      "profileImage": "https://images.unsplash.com/photo-1567591414240-e14f6b1eefb5?w=400&auto=format&fit=crop&q=80",
+      "capital": 75000,
+      "currency": "₹",
+      "updatedAt": "2026-09-04T13:02:41.883Z"
+    }
+  ],
+  "expenses": [
+    {
+      "id": "exp_sbvmb_1",
+      "userId": "user_sbvmb_youth",
+      "title": "Clay Vinayaka Idol (14 ft Eco-Friendly)",
+      "amount": 38000,
+      "category": "Idol / Pratima",
+      "date": "2026-09-01",
+      "notes": "Booked from Dhoolpet artisans with water-soluble colors",
+      "order": 0,
+      "createdAt": "2026-09-04T13:02:33.225Z",
+      "updatedAt": "2026-09-04T13:02:33.225Z"
+    },
+    {
+      "id": "exp_sbvmb_2",
+      "userId": "user_sbvmb_youth",
+      "title": "Grand Pandal, Stage & Water-proof Shedding",
+      "amount": 28500,
+      "category": "Decoration & Tent / Pandal",
+      "date": "2026-09-01",
+      "notes": "11 days pandal setup with floral arch entrance",
+      "order": 1,
+      "createdAt": "2026-09-04T13:02:33.225Z",
+      "updatedAt": "2026-09-04T13:02:33.225Z"
+    },
+    {
+      "id": "exp_sbvmb_3",
+      "userId": "user_sbvmb_youth",
+      "title": "Sound System, Speakers & Focus Lighting",
+      "amount": 16000,
+      "category": "Sound & Lighting",
+      "date": "2026-09-01",
+      "notes": "Daily evening aarti music & announcements",
+      "order": 2,
+      "createdAt": "2026-09-04T13:02:33.225Z",
+      "updatedAt": "2026-09-04T13:02:33.225Z"
+    },
+    {
+      "id": "exp_sbvmb_4",
+      "userId": "user_sbvmb_youth",
+      "title": "Daily Pooja Flowers, Garlands & Priest Dakshina",
+      "amount": 9500,
+      "category": "Puja & Priest",
+      "date": "2026-09-01",
+      "notes": "Veda pandits daily morning & evening puja rituals",
+      "order": 3,
+      "createdAt": "2026-09-04T13:02:33.225Z",
+      "updatedAt": "2026-09-04T13:02:33.225Z"
+    },
+    {
+      "id": "exp_sbvmb_5",
+      "userId": "user_sbvmb_youth",
+      "title": "Modaks & Maha Prasadam Distribution (Day 1-5)",
+      "amount": 14200,
+      "category": "Prasadam & Food",
+      "date": "2026-09-01",
+      "notes": "5000 packets prasadam for devotees",
+      "order": 4,
+      "createdAt": "2026-09-04T13:02:33.225Z",
+      "updatedAt": "2026-09-04T13:02:33.225Z"
+    },
+    {
+      "id": "exp_sbvmb_6",
+      "userId": "user_sbvmb_youth",
+      "title": "Police Permission, Fire Safety & Generator Backup",
+      "amount": 5800,
+      "category": "Permissions & Security",
+      "date": "2026-09-01",
+      "notes": "Official clearances and 15kVA generator",
+      "order": 5,
+      "createdAt": "2026-09-04T13:02:33.225Z",
+      "updatedAt": "2026-09-04T13:02:33.225Z"
+    },
+    {
+      "id": "exp_e82049b8-ffbe-4cd0-8c3d-6dfcd478a3ea",
+      "userId": "user_sbvmb_youth",
+      "title": "Evening Aarti Laddoo Garland",
+      "amount": 4500,
+      "category": "Prasadam & Food",
+      "date": "2026-09-02",
+      "notes": "Ordered special 11kg laddoo",
+      "order": 6,
+      "createdAt": "2026-09-04T13:02:41.876Z",
+      "updatedAt": "2026-09-04T13:02:41.876Z"
+    },
+    {
+      "id": "exp_5814bd88-fc4d-48ef-bd9d-92d198094d87",
+      "userId": "user_44f09351-022d-4b88-a45c-a9abcdc45bec",
+      "title": "Eco Clay Balaji Vinayaka 9ft",
+      "amount": 22000,
+      "category": "Idol / Pratima",
+      "date": "2026-09-01",
+      "notes": "",
+      "order": 0,
+      "createdAt": "2026-09-04T13:02:41.899Z",
+      "updatedAt": "2026-09-04T13:02:41.899Z"
+    }
+  ],
+  "sessions": [
+    {
+      "token": "28bb366a255c3380c2f0efc1b3fef019f4441bec264683da5d66119708aef7ea",
+      "userId": "user_sbvmb_youth",
+      "createdAt": "2026-09-04T13:02:41.869Z",
+      "expiresAt": 1791118961869
+    },
+    {
+      "token": "c8e7e7544e6603cda82fa1e0d224941de4d924fe30dbbc9155b31576c2cb71b2",
+      "userId": "user_44f09351-022d-4b88-a45c-a9abcdc45bec",
+      "createdAt": "2026-09-04T13:02:41.883Z",
+      "expiresAt": 1791118961883
+    }
+  ]
+}
