@@ -1,0 +1,6 @@
+{
+  "name": "Ganesh Tracker",
+  "description": "Vinayaka Chavithi finance and expense tracker for festival committees with budget visualization and shareable public pages.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
