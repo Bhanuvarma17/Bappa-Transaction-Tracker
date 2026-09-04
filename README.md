@@ -17,11 +17,3 @@ Committee leaders can create a public committee profile, set their available bud
 * 💾 Persistent data across logout and browser restarts
 * 🚫 Maximum of 90 expenses per committee
 
-### Example
-
-A committee can have a public profile such as:
-
-`/SBVMB-Youth`
-
-Visitors can view the committee's profile, budget information and expenses without creating an account.
-
