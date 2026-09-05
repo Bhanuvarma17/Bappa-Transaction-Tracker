@@ -1,4 +1,14 @@
-import { User, Profile, Expense, CommitteePublicData, PublicCommitteeSummary } from "./types";
+import {
+  User,
+  Profile,
+  Expense,
+  CommitteePublicData,
+  PublicCommitteeSummary,
+  ForgotPasswordResponse,
+  VerifyOtpResponse,
+  ResetPasswordResponse,
+  ChangePasswordResponse,
+} from "./types";
 
 const TOKEN_KEY = "ganesh_tracker_token";
 
@@ -90,6 +100,46 @@ export const api = {
     }
   },
 
+  async forgotPassword(email: string): Promise<ForgotPasswordResponse> {
+    return request<ForgotPasswordResponse>("/api/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  async verifyOtp(payload: { email: string; otp: string }): Promise<VerifyOtpResponse> {
+    return request<VerifyOtpResponse>("/api/auth/verify-otp", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async resetPassword(payload: {
+    email: string;
+    resetToken: string;
+    newPassword: string;
+    confirmPassword: string;
+  }): Promise<ResetPasswordResponse> {
+    return request<ResetPasswordResponse>("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async changePassword(payload: {
+    currentPassword: string;
+    newPassword: string;
+    confirmPassword: string;
+  }): Promise<ChangePasswordResponse> {
+    const res = await request<ChangePasswordResponse>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    // Successful change-password invalidates server-side sessions; clear local token
+    clearToken();
+    return res;
+  },
+
   // Profile (Private)
   async updateProfile(payload: {
     username?: string;
@@ -156,5 +206,16 @@ export const api = {
 
   async getPublicCommittees(): Promise<PublicCommitteeSummary[]> {
     return request<PublicCommitteeSummary[]>("/api/public/committees");
+  },
+
+  async checkUsernameAvailability(
+    username: string,
+    excludeUserId?: string
+  ): Promise<{ available: boolean; error?: string }> {
+    const encoded = encodeURIComponent(username.trim());
+    const query = excludeUserId ? `?excludeUserId=${encodeURIComponent(excludeUserId)}` : "";
+    return request<{ available: boolean; error?: string }>(
+      `/api/public/check-username/${encoded}${query}`
+    );
   },
 };

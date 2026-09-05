@@ -29,6 +29,7 @@ interface DashboardProps {
   onViewPublicProfile: (username: string) => void;
   onUpdateProfileState: (updated: Profile) => void;
   onUpdateExpensesState: (expenses: Expense[]) => void;
+  onPasswordChanged?: () => void;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
@@ -39,6 +40,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onViewPublicProfile,
   onUpdateProfileState,
   onUpdateExpensesState,
+  onPasswordChanged,
 }) => {
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
@@ -319,6 +321,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         onClose={() => setIsProfileModalOpen(false)}
         currentProfile={profile}
         onSave={handleSaveProfile}
+        onPasswordChanged={onPasswordChanged}
       />
 
       {/* Expense Add / Edit Modal */}

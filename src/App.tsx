@@ -113,6 +113,15 @@ export default function App() {
     navigateTo("/dashboard");
   };
 
+  const handlePasswordChanged = () => {
+    setIsNavProfileModalOpen(false);
+    clearToken();
+    setCurrentUser(null);
+    setCurrentProfile(null);
+    setExpenses([]);
+    navigateTo("/login");
+  };
+
   const handleLogout = async () => {
     await api.logout();
     setCurrentUser(null);
@@ -125,12 +134,25 @@ export default function App() {
     navigateTo(`/${encodeURIComponent(username)}`);
   };
 
+  const handleExploreCommittees = async () => {
+    try {
+      const committees = await api.getPublicCommittees();
+      if (committees && committees.length > 0) {
+        handleViewPublicProfile(committees[0].username);
+      } else {
+        navigateTo("/signup");
+      }
+    } catch {
+      navigateTo("/signup");
+    }
+  };
+
   if (isAuthChecking) {
     return (
       <div className="min-h-screen bg-[#FFFDFB] dark:bg-[#121316] flex items-center justify-center transition-colors">
         <div className="text-center space-y-3">
           <div className="w-10 h-10 border-3 border-[#FF9933] border-t-transparent rounded-full animate-spin mx-auto" />
-          <p className="text-xs font-semibold text-[#2D3436] dark:text-[#F1F2F6]">Initializing Ganesh Tracker...</p>
+          <p className="text-xs font-semibold text-[#2D3436] dark:text-[#F1F2F6]">Initializing Bappa Transaction Tracker...</p>
         </div>
       </div>
     );
@@ -183,7 +205,7 @@ export default function App() {
             initialMode={currentRoute === "login" ? "login" : "signup"}
             initialUsername={routeParam}
             onSuccess={handleAuthSuccess}
-            onExploreCommittees={() => handleViewPublicProfile("SBVMB Youth")}
+            onExploreCommittees={handleExploreCommittees}
           />
         )}
 
@@ -198,12 +220,13 @@ export default function App() {
               onViewPublicProfile={handleViewPublicProfile}
               onUpdateProfileState={(updated) => setCurrentProfile(updated)}
               onUpdateExpensesState={(newExpenses) => setExpenses(newExpenses)}
+              onPasswordChanged={handlePasswordChanged}
             />
           ) : (
             <AuthPage
               initialMode="login"
               onSuccess={handleAuthSuccess}
-              onExploreCommittees={() => handleViewPublicProfile("SBVMB Youth")}
+              onExploreCommittees={handleExploreCommittees}
             />
           )
         )}
@@ -219,6 +242,7 @@ export default function App() {
             const res = await api.updateProfile(updatedData);
             setCurrentProfile(res.profile);
           }}
+          onPasswordChanged={handlePasswordChanged}
         />
       )}
     </div>

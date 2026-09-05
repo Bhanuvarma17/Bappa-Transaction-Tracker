@@ -84,7 +84,7 @@ export const NotFoundPage: React.FC<NotFoundPageProps> = ({
             <input
               id="search-committee-404-input"
               type="text"
-              placeholder="Search other committees (e.g. SBVMB Youth)..."
+              placeholder="Search committees (e.g. SBVMB-Youth or ganesh_utsav)..."
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               className="w-full pl-9 pr-20 py-2.5 text-xs rounded-xl border border-[#F1F2F6] dark:border-[#2E323D] bg-[#F8F9FA] dark:bg-[#22252D] text-[#2D3436] dark:text-[#F1F2F6] placeholder-gray-400 dark:placeholder-gray-500 focus:bg-white dark:focus:bg-[#1A1C22] focus:outline-hidden focus:ring-2 focus:ring-[#FF9933]/30 focus:border-[#FF9933] transition-all"
@@ -131,7 +131,7 @@ export const NotFoundPage: React.FC<NotFoundPageProps> = ({
             className="inline-flex items-center gap-1.5 text-xs font-bold text-gray-400 dark:text-gray-400 hover:text-[#1A1A1A] dark:hover:text-white transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
-            <span>Return to Ganesh Tracker Home</span>
+            <span>Return to Bappa Transaction Tracker Home</span>
           </button>
         </div>
       </div>

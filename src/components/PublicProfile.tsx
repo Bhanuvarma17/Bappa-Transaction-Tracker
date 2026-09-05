@@ -65,7 +65,7 @@ export const PublicProfile: React.FC<PublicProfileProps> = ({
     if (navigator.share) {
       try {
         await navigator.share({
-          title: data?.profile.displayName || "Ganesh Tracker",
+          title: data?.profile.displayName || "Bappa Transaction Tracker",
           text: `View Vinayaka Chavithi expenses and budget for ${data?.profile.displayName}`,
           url: shareUrl,
         });
@@ -130,7 +130,7 @@ export const PublicProfile: React.FC<PublicProfileProps> = ({
             className="flex items-center gap-1.5 text-xs font-bold text-gray-600 dark:text-gray-300 hover:text-[#1A1A1A] dark:hover:text-white transition-colors"
           >
             <ArrowLeft className="w-4 h-4 text-gray-400" />
-            <span>Ganesh Tracker</span>
+            <span>Bappa Transaction Tracker</span>
           </button>
 
           <div className="flex items-center gap-2">
@@ -349,7 +349,7 @@ export const PublicProfile: React.FC<PublicProfileProps> = ({
             <span>Public Read-Only Transparency View</span>
           </div>
           <p className="text-[11px] text-gray-400 dark:text-gray-500">
-            Powered by <strong>Ganesh Tracker</strong> • Vinayaka Chavithi Finance Ledger
+            Powered by <strong>Bappa Transaction Tracker</strong> • Vinayaka Chavithi Finance Ledger
           </p>
         </div>
       </main>

@@ -1,8 +1,10 @@
+import "dotenv/config";
 import express from "express";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
+import { EmailService, maskEmail } from "./server/emailService";
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -55,11 +57,27 @@ interface Session {
   expiresAt: number;
 }
 
+export interface PasswordResetRequest {
+  id: string;
+  userId: string;
+  email: string;
+  otpHash: string;
+  otpSalt: string;
+  resetTokenHash?: string;
+  resetTokenExpiresAt?: number;
+  expiresAt: number;
+  attempts: number;
+  resendCooldownUntil: number;
+  verified: boolean;
+  createdAt: string;
+}
+
 interface DatabaseSchema {
   users: User[];
   profiles: Profile[];
   expenses: Expense[];
   sessions: Session[];
+  passwordResetRequests?: PasswordResetRequest[];
 }
 
 // In-memory state backed by disk
@@ -67,7 +85,8 @@ let db: DatabaseSchema = {
   users: [],
   profiles: [],
   expenses: [],
-  sessions: []
+  sessions: [],
+  passwordResetRequests: []
 };
 
 function ensureDataDir() {
@@ -83,6 +102,9 @@ function loadDatabase() {
     try {
       const data = fs.readFileSync(STORE_FILE, "utf-8");
       db = JSON.parse(data);
+      if (!db.passwordResetRequests) {
+        db.passwordResetRequests = [];
+      }
 
       console.log(
         `Database loaded: ${db.users.length} users, ${db.profiles.length} profiles, ${db.expenses.length} expenses.`
@@ -99,7 +121,6 @@ function loadDatabase() {
 
   console.log("No database found. Starting with an empty database.");
 
-  seedDefaultData();
   saveDatabase();
 }
 
@@ -126,55 +147,40 @@ function verifyPassword(password: string, hash: string, salt: string): boolean {
   return computedHash === hash;
 }
 
+function isValidEmail(email: string): boolean {
+  if (!email || typeof email !== "string") return false;
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email.trim());
+}
 
+function isValidPassword(password: string): boolean {
+  return typeof password === "string" && password.length >= 8 && /[A-Za-z]/.test(password) && /[0-9]/.test(password);
+}
 
-function seedDefaultData() {
-  const user1Id = "user_sbvmb_youth";
-  const { hash: h1, salt: s1 } = hashPassword("sbvmb123");
-  db.users.push({
-    id: user1Id,
-    email: "sbvmb@ganeshutsav.org",
-    passwordHash: h1,
-    passwordSalt: s1,
-    createdAt: new Date().toISOString()
-  });
+// Strict username validation: only letters, digits, hyphens, underscores. 3–40 chars. NO spaces.
+function isValidUsername(username: string): { valid: boolean; reason?: string } {
+  if (!username || typeof username !== "string") {
+    return { valid: false, reason: "Committee name is required." };
+  }
+  const trimmed = username.trim();
+  if (trimmed.length < 3) {
+    return { valid: false, reason: "Committee name must be at least 3 characters." };
+  }
+  if (trimmed.length > 40) {
+    return { valid: false, reason: "Committee name must be 40 characters or fewer." };
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) {
+    return { valid: false, reason: "Use only letters, numbers, hyphens (-), and underscores (_). Spaces and special characters are not allowed." };
+  }
+  return { valid: true };
+}
 
-
-  db.profiles.push({
-    userId: user1Id,
-    username: "SBVMB Youth",
-    normalizedUsername: "sbvmb youth",
-    displayName: "SBVMB Youth Ganesh Utsav Committee",
-    bio: "Grand 11-Day Vinayaka Chavithi celebrations at Main Bazar. Join us for daily grand aarti, cultural events & laddoo auction.",
-    profileImage: "https://images.unsplash.com/photo-1567591414240-e14f6b1eefb5?w=400&auto=format&fit=crop&q=80",
-    capital: 125000,
-    currency: "₹",
-    updatedAt: new Date().toISOString()
-  });
-
-  const sampleExpenses = [
-    { title: "Clay Vinayaka Idol (14 ft Eco-Friendly)", amount: 38000, category: "Idol / Pratima", notes: "Booked from Dhoolpet artisans with water-soluble colors", order: 0 },
-    { title: "Grand Pandal, Stage & Water-proof Shedding", amount: 28500, category: "Decoration & Tent / Pandal", notes: "11 days pandal setup with floral arch entrance", order: 1 },
-    { title: "Sound System, Speakers & Focus Lighting", amount: 16000, category: "Sound & Lighting", notes: "Daily evening aarti music & announcements", order: 2 },
-    { title: "Daily Pooja Flowers, Garlands & Priest Dakshina", amount: 9500, category: "Puja & Priest", notes: "Veda pandits daily morning & evening puja rituals", order: 3 },
-    { title: "Modaks & Maha Prasadam Distribution (Day 1-5)", amount: 14200, category: "Prasadam & Food", notes: "5000 packets prasadam for devotees", order: 4 },
-    { title: "Police Permission, Fire Safety & Generator Backup", amount: 5800, category: "Permissions & Security", notes: "Official clearances and 15kVA generator", order: 5 }
-  ];
-
-  sampleExpenses.forEach((exp, idx) => {
-    db.expenses.push({
-      id: `exp_sbvmb_${idx + 1}`,
-      userId: user1Id,
-      title: exp.title,
-      amount: exp.amount,
-      category: exp.category,
-      date: "2026-09-01",
-      notes: exp.notes,
-      order: exp.order,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    });
-  });
+function checkEmailRateLimit(email: string): boolean {
+  const oneHourAgo = Date.now() - 60 * 60 * 1000;
+  const requests = (db.passwordResetRequests || []).filter(
+    r => r.email === email && new Date(r.createdAt).getTime() > oneHourAgo
+  );
+  return requests.length < 5;
 }
 
 // Authentication Middleware
@@ -225,16 +231,17 @@ app.post("/api/auth/signup", (req, res) => {
   }
 
   if (!username || typeof username !== "string" || !username.trim()) {
-    res.status(400).json({ error: "Committee username is required." });
+    res.status(400).json({ error: "Committee name is required." });
     return;
   }
 
   const trimmedUsername = username.trim();
   const normalizedUsername = trimmedUsername.toLowerCase();
 
-  // Validate username format (letters, digits, spaces, hyphens, underscores)
-  if (!/^[a-zA-Z0-9 _-]+$/.test(trimmedUsername) || trimmedUsername.length > 50) {
-    res.status(400).json({ error: "Username can only contain letters, numbers, spaces, hyphens and underscores (max 50 chars)." });
+  // Strict username validation: only A-Za-z0-9_- (NO spaces), 3–40 chars
+  const usernameCheck = isValidUsername(trimmedUsername);
+  if (!usernameCheck.valid) {
+    res.status(400).json({ error: usernameCheck.reason });
     return;
   }
 
@@ -369,6 +376,279 @@ app.post("/api/auth/logout", authenticateToken, (req, res) => {
   res.json({ success: true });
 });
 
+// Auth: Forgot Password - Step 1: Send 6-digit OTP
+app.post("/api/auth/forgot-password", async (req, res) => {
+  const { email } = req.body;
+
+  if (!isValidEmail(email)) {
+    res.status(400).json({ error: "Please enter a valid email address." });
+    return;
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+
+  // Ensure array exists
+  if (!db.passwordResetRequests) {
+    db.passwordResetRequests = [];
+  }
+
+  // Check resend cooldown timer (60s)
+  const existingActive = db.passwordResetRequests.find(
+    r => r.email === normalizedEmail && !r.verified && r.expiresAt > Date.now()
+  );
+
+  if (existingActive && existingActive.resendCooldownUntil > Date.now()) {
+    const waitSec = Math.ceil((existingActive.resendCooldownUntil - Date.now()) / 1000);
+    res.status(429).json({ error: `Please wait ${waitSec} seconds before requesting a new OTP.` });
+    return;
+  }
+
+  // Rate limit: max 5 requests per hour
+  if (!checkEmailRateLimit(normalizedEmail)) {
+    res.status(429).json({ error: "Too many OTP requests. Please wait an hour before requesting again." });
+    return;
+  }
+
+  // Look up user (never reveal existence to caller)
+  const user = db.users.find(u => u.email.toLowerCase() === normalizedEmail);
+
+  if (!user) {
+    // Timing attack mitigation: simulate PBKDF2 calculation
+    hashPassword("dummy_timing_protection_password");
+    res.json({ message: "If an account exists with this email, an OTP has been sent." });
+    return;
+  }
+
+  // Invalidate any previous reset requests for this user
+  db.passwordResetRequests = db.passwordResetRequests.filter(r => r.userId !== user.id);
+
+  // Generate 6-digit cryptographic OTP
+  const otp = crypto.randomInt(100000, 1000000).toString();
+
+  // Securely hash OTP before saving
+  const { hash: otpHash, salt: otpSalt } = hashPassword(otp);
+
+  const resetRequest: PasswordResetRequest = {
+    id: `reset_${crypto.randomUUID()}`,
+    userId: user.id,
+    email: normalizedEmail,
+    otpHash,
+    otpSalt,
+    expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
+    attempts: 0,
+    resendCooldownUntil: Date.now() + 60 * 1000, // 60s cooldown
+    verified: false,
+    createdAt: new Date().toISOString()
+  };
+
+  db.passwordResetRequests.push(resetRequest);
+  saveDatabase();
+
+  // Dispatch OTP email (never log OTP to stdout)
+  try {
+    await EmailService.sendOtpEmail(normalizedEmail, otp);
+  } catch (err) {
+    console.error(`Failed to dispatch OTP email to ${maskEmail(normalizedEmail)}:`, err);
+  }
+
+  // Generic message: never reveal whether account was found
+  res.json({ message: "If an account exists with this email, an OTP has been sent." });
+});
+
+// Auth: Verify OTP - Step 2: Validate 6-digit OTP & generate one-time reset token
+app.post("/api/auth/verify-otp", (req, res) => {
+  const { email, otp } = req.body;
+
+  if (!isValidEmail(email)) {
+    res.status(400).json({ error: "Please enter a valid email address." });
+    return;
+  }
+
+  if (!otp || typeof otp !== "string" || !/^\d{6}$/.test(otp.trim())) {
+    res.status(400).json({ error: "OTP must be exactly 6 digits." });
+    return;
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const cleanOtp = otp.trim();
+
+  if (!db.passwordResetRequests) {
+    db.passwordResetRequests = [];
+  }
+
+  const request = db.passwordResetRequests.find(
+    r => r.email === normalizedEmail && !r.verified
+  );
+
+  if (!request || request.expiresAt < Date.now()) {
+    res.status(400).json({ error: "Invalid or expired OTP. Please request a new one." });
+    return;
+  }
+
+  if (request.attempts >= 5) {
+    // Invalidate request
+    db.passwordResetRequests = db.passwordResetRequests.filter(r => r.id !== request.id);
+    saveDatabase();
+    res.status(429).json({ error: "Too many incorrect attempts. This OTP has been invalidated. Please request a new one." });
+    return;
+  }
+
+  request.attempts++;
+
+  const isValid = verifyPassword(cleanOtp, request.otpHash, request.otpSalt);
+  if (!isValid) {
+    saveDatabase();
+    if (request.attempts >= 5) {
+      db.passwordResetRequests = db.passwordResetRequests.filter(r => r.id !== request.id);
+      saveDatabase();
+      res.status(400).json({ error: "Too many incorrect attempts. This OTP has been invalidated. Please request a new one." });
+      return;
+    }
+    const remaining = 5 - request.attempts;
+    res.status(400).json({ error: `Invalid OTP. ${remaining} ${remaining === 1 ? "attempt" : "attempts"} remaining.` });
+    return;
+  }
+
+  // OTP verified: single-use. Invalidate OTP hash and issue ephemeral reset token.
+  request.verified = true;
+  request.otpHash = ""; // erase hashed OTP so it cannot be reused
+
+  const resetToken = crypto.randomBytes(32).toString("hex");
+  const { hash: tokenHash } = hashPassword(resetToken, request.otpSalt);
+  request.resetTokenHash = tokenHash;
+  request.resetTokenExpiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes to set new password
+
+  saveDatabase();
+
+  res.json({
+    message: "OTP verified successfully.",
+    resetToken
+  });
+});
+
+// Auth: Reset Password - Step 3: Set new password with verified reset token
+app.post("/api/auth/reset-password", (req, res) => {
+  const { email, resetToken, newPassword, confirmPassword } = req.body;
+
+  if (!isValidEmail(email)) {
+    res.status(400).json({ error: "Please provide a valid email address." });
+    return;
+  }
+
+  if (!resetToken || typeof resetToken !== "string") {
+    res.status(400).json({ error: "Reset verification token is missing or invalid." });
+    return;
+  }
+
+  if (!newPassword || typeof newPassword !== "string") {
+    res.status(400).json({ error: "New password is required." });
+    return;
+  }
+
+  if (newPassword !== confirmPassword) {
+    res.status(400).json({ error: "New password and confirmation do not match." });
+    return;
+  }
+
+  if (!isValidPassword(newPassword)) {
+    res.status(400).json({ error: "Password must be at least 8 characters long and contain both letters and numbers." });
+    return;
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+
+  if (!db.passwordResetRequests) {
+    db.passwordResetRequests = [];
+  }
+
+  const request = db.passwordResetRequests.find(
+    r => r.email === normalizedEmail && r.verified
+  );
+
+  if (!request || !request.resetTokenExpiresAt || request.resetTokenExpiresAt < Date.now()) {
+    res.status(400).json({ error: "Reset session has expired. Please start the recovery process again." });
+    return;
+  }
+
+  const isTokenValid = request.resetTokenHash && verifyPassword(resetToken, request.resetTokenHash, request.otpSalt);
+  if (!isTokenValid) {
+    res.status(400).json({ error: "Invalid or expired reset session. Please request a new OTP." });
+    return;
+  }
+
+  const user = db.users.find(u => u.id === request.userId);
+  if (!user) {
+    res.status(404).json({ error: "User account associated with reset request not found." });
+    return;
+  }
+
+  // Hash new password
+  const { hash, salt } = hashPassword(newPassword);
+  user.passwordHash = hash;
+  user.passwordSalt = salt;
+
+  // Invalidate ALL existing sessions for this account
+  db.sessions = db.sessions.filter(s => s.userId !== user.id);
+
+  // Invalidate all reset requests for this account
+  db.passwordResetRequests = db.passwordResetRequests.filter(r => r.userId !== user.id);
+
+  saveDatabase();
+
+  res.json({ message: "Password changed successfully." });
+});
+
+// Auth: Change Password (Authenticated users)
+app.post("/api/auth/change-password", authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { currentPassword, newPassword, confirmPassword } = req.body;
+
+  if (!currentPassword || typeof currentPassword !== "string") {
+    res.status(400).json({ error: "Current password is required." });
+    return;
+  }
+
+  if (!newPassword || typeof newPassword !== "string") {
+    res.status(400).json({ error: "New password is required." });
+    return;
+  }
+
+  if (newPassword !== confirmPassword) {
+    res.status(400).json({ error: "New password and confirmation do not match." });
+    return;
+  }
+
+  if (!isValidPassword(newPassword)) {
+    res.status(400).json({ error: "New password must be at least 8 characters long and contain both letters and numbers." });
+    return;
+  }
+
+  // Verify current password
+  const isCurrentCorrect = verifyPassword(currentPassword, user.passwordHash, user.passwordSalt);
+  if (!isCurrentCorrect) {
+    res.status(400).json({ error: "Incorrect current password. Please try again." });
+    return;
+  }
+
+  // Prevent re-using same password
+  if (verifyPassword(newPassword, user.passwordHash, user.passwordSalt)) {
+    res.status(400).json({ error: "New password must be different from your current password." });
+    return;
+  }
+
+  // Update password securely
+  const { hash, salt } = hashPassword(newPassword);
+  user.passwordHash = hash;
+  user.passwordSalt = salt;
+
+  // Invalidate ALL existing sessions for this user
+  db.sessions = db.sessions.filter(s => s.userId !== user.id);
+
+  saveDatabase();
+
+  res.json({ message: "Password changed successfully." });
+});
+
 // --- PROFILE MANAGEMENT (PRIVATE - USER CAN ONLY EDIT OWN PROFILE) ---
 app.put("/api/profile", authenticateToken, (req, res) => {
   const user = (req as any).user as User;
@@ -382,24 +662,27 @@ app.put("/api/profile", authenticateToken, (req, res) => {
   const currentProfile = db.profiles[profileIndex];
   const { username, displayName, bio, profileImage, capital, currency } = req.body;
 
-  // If username is changing, ensure uniqueness
+  // If username is changing, ensure strict format and uniqueness
   if (username && typeof username === "string") {
     const trimmedUsername = username.trim();
-    const normalized = trimmedUsername.toLowerCase();
     if (!trimmedUsername) {
-      res.status(400).json({ error: "Username cannot be empty." });
+      res.status(400).json({ error: "Committee name cannot be empty." });
       return;
     }
 
-    if (!/^[a-zA-Z0-9 _-]+$/.test(trimmedUsername) || trimmedUsername.length > 50) {
-      res.status(400).json({ error: "Username can only contain letters, numbers, spaces, hyphens and underscores." });
+    // Strict validation: only A-Za-z0-9_- (NO spaces), 3–40 chars
+    const usernameCheck = isValidUsername(trimmedUsername);
+    if (!usernameCheck.valid) {
+      res.status(400).json({ error: usernameCheck.reason });
       return;
     }
 
+    const normalized = trimmedUsername.toLowerCase();
     if (normalized !== currentProfile.normalizedUsername) {
+      // Case-insensitive uniqueness check — exclude this user's own profile
       const exists = db.profiles.some(p => p.userId !== user.id && p.normalizedUsername === normalized);
       if (exists) {
-        res.status(400).json({ error: `Username "${trimmedUsername}" is already taken by another committee.` });
+        res.status(400).json({ error: `The committee name "${trimmedUsername}" is already taken. Please choose a different name.` });
         return;
       }
       currentProfile.username = trimmedUsername;
@@ -674,6 +957,38 @@ app.get("/api/public/committee/:username", (req, res) => {
   });
 });
 
+// Public: Real-time username availability check (used by frontend for live validation)
+app.get("/api/public/check-username/:username", (req, res) => {
+  const rawParam = req.params.username;
+  if (!rawParam) {
+    res.status(400).json({ available: false, error: "Username parameter is required." });
+    return;
+  }
+
+  const trimmed = decodeURIComponent(rawParam).trim();
+
+  // Validate format first
+  const check = isValidUsername(trimmed);
+  if (!check.valid) {
+    res.json({ available: false, error: check.reason });
+    return;
+  }
+
+  const normalized = trimmed.toLowerCase();
+  const excludeUserId = req.query.excludeUserId as string | undefined;
+
+  const taken = db.profiles.some(p => {
+    if (excludeUserId && p.userId === excludeUserId) return false;
+    return p.normalizedUsername === normalized;
+  });
+
+  if (taken) {
+    res.json({ available: false, error: `The committee name "${trimmed}" is already taken.` });
+  } else {
+    res.json({ available: true });
+  }
+});
+
 // Public List: Suggest committees (e.g. for search / 404 page)
 app.get("/api/public/committees", (_req, res) => {
   const list = db.profiles.map(p => ({
@@ -706,7 +1021,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Ganesh Tracker Server running on http://localhost:${PORT}`);
+    console.log(`Bappa Transaction Tracker Server running on http://localhost:${PORT}`);
   });
 }
 

@@ -50,12 +50,12 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Logo / Brand */}
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-[#FF9933] text-white flex items-center justify-center font-black text-lg shadow-inner select-none flex-shrink-0">
-            G
+            B
           </div>
           <div>
             <div className="flex items-center gap-1.5">
               <span className="font-extrabold text-[#1A1A1A] dark:text-[#F1F2F6] tracking-tight text-base sm:text-lg leading-none">
-                Ganesh<span className="text-[#FF9933]">Tracker</span>
+                Bappa Transaction <span className="text-[#FF9933]">Tracker</span>
               </span>
               <span className="text-[9px] uppercase font-black tracking-wider bg-[#FFE8CC] dark:bg-[#38230D] text-[#FF9933] dark:text-[#FFB366] px-2 py-0.5 rounded-full border border-transparent dark:border-[#543516]">
                 Portal v1.0
