@@ -118,6 +118,7 @@ export const PublicProfile: React.FC<PublicProfileProps> = ({
   if (!data) return null;
 
   const { profile, expenses, summary } = data;
+  const sortedExpenses = [...expenses].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   const isOverBudget = summary.remainingBudget < 0;
 
   return (
@@ -281,11 +282,11 @@ export const PublicProfile: React.FC<PublicProfileProps> = ({
               </h2>
             </div>
             <span className="text-[9px] uppercase font-black tracking-wider px-2.5 py-0.5 rounded-full bg-[#F8F9FA] dark:bg-[#22252D] text-gray-500 dark:text-gray-400 border border-[#F1F2F6] dark:border-[#282B34]">
-              {expenses.length} records in order
+              {sortedExpenses.length} records in order
             </span>
           </div>
 
-          {expenses.length === 0 ? (
+          {sortedExpenses.length === 0 ? (
             <div className="bg-white dark:bg-[#1A1C22] rounded-2xl p-10 text-center border border-[#F1F2F6] dark:border-[#282B34] shadow-sm">
               <div className="w-12 h-12 bg-[#F8F9FA] dark:bg-[#22252D] rounded-2xl border border-[#F1F2F6] dark:border-[#282B34] flex items-center justify-center mx-auto mb-3 text-gray-400">
                 <Receipt className="w-6 h-6" />
@@ -297,7 +298,7 @@ export const PublicProfile: React.FC<PublicProfileProps> = ({
             </div>
           ) : (
             <div className="space-y-2.5">
-              {expenses.map((expense, idx) => (
+              {sortedExpenses.map((expense, idx) => (
                 <div
                   key={expense.id}
                   id={`public-expense-${expense.id}`}

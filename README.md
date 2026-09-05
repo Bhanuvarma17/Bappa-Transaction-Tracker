@@ -6,10 +6,9 @@ Committee leaders can create a public committee profile, set their available bud
 
 ### Key Features
 
-* 🔐 User registration and login
-* 🔑 Secure password recovery via 6-digit email OTP (hashed, 10-minute expiry, single-use, rate-limited)
-* 🛡️ Authenticated "Change Password" in committee settings with server-side validation
-* 👤 Unique committee profiles
+* 🔐 User registration and login (Email or Committee Username)
+* 🛡️ Authenticated "Change Password" in committee settings with PBKDF2 hashing and session invalidation
+* 👤 Unique committee profiles with custom usernames (e.g. `/SBVMB-Youth`)
 * 💰 Budget/capital tracking
 * 🧾 Add, edit, delete and reorder expenses
 * 📊 Remaining budget visualization
@@ -19,30 +18,17 @@ Committee leaders can create a public committee profile, set their available bud
 * 💾 Persistent data across logout and browser restarts
 * 🚫 Maximum of 90 expenses per committee
 
-### Password Recovery & Email Configuration
+### Password Management
 
-The application includes an email OTP verification system for forgotten passwords:
+The application features authenticated password management for committee leaders:
 
-1. Click **"Forgot Password?"** on the Sign In page.
-2. Enter the registered committee email address.
-3. Receive a 6-digit OTP code (valid for 10 minutes, single-use).
-4. Enter the code and set a new, strong password.
-5. All prior active sessions are automatically invalidated upon password reset.
-
-#### Configuring Live Email Delivery (SMTP)
-
-To send real verification emails, add your SMTP credentials to `.env`:
-
-```env
-SMTP_HOST="smtp.gmail.com"
-SMTP_PORT=587
-SMTP_USER="your-email@gmail.com"
-SMTP_PASS="your-app-password"
-SMTP_SECURE=false
-EMAIL_FROM="Bappa Transaction Tracker <noreply@yourdomain.com>"
-```
-
-*Note: If no SMTP credentials are configured, the app runs in development mode and safely records simulated email deliveries to `data/dev_mailbox.json` without logging OTP secrets to stdout.*
+1. Log into your committee dashboard with your email/username and password.
+2. Open **"Edit Committee Profile"** or account settings.
+3. In the **"Change Password"** section:
+   - Provide your current active password.
+   - Enter your new secure password (minimum 8 characters, containing letters and numbers).
+   - Confirm the new password.
+4. Upon successful password change, passwords are encrypted with PBKDF2 with unique cryptographic salts, and all other active sessions are automatically invalidated for security.
 
 ### Example
 

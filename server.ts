@@ -4,7 +4,6 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
-import { EmailService, maskEmail } from "./server/emailService";
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -57,27 +56,11 @@ interface Session {
   expiresAt: number;
 }
 
-export interface PasswordResetRequest {
-  id: string;
-  userId: string;
-  email: string;
-  otpHash: string;
-  otpSalt: string;
-  resetTokenHash?: string;
-  resetTokenExpiresAt?: number;
-  expiresAt: number;
-  attempts: number;
-  resendCooldownUntil: number;
-  verified: boolean;
-  createdAt: string;
-}
-
 interface DatabaseSchema {
   users: User[];
   profiles: Profile[];
   expenses: Expense[];
   sessions: Session[];
-  passwordResetRequests?: PasswordResetRequest[];
 }
 
 // In-memory state backed by disk
@@ -85,8 +68,7 @@ let db: DatabaseSchema = {
   users: [],
   profiles: [],
   expenses: [],
-  sessions: [],
-  passwordResetRequests: []
+  sessions: []
 };
 
 function ensureDataDir() {
@@ -102,9 +84,6 @@ function loadDatabase() {
     try {
       const data = fs.readFileSync(STORE_FILE, "utf-8");
       db = JSON.parse(data);
-      if (!db.passwordResetRequests) {
-        db.passwordResetRequests = [];
-      }
 
       console.log(
         `Database loaded: ${db.users.length} users, ${db.profiles.length} profiles, ${db.expenses.length} expenses.`
@@ -173,14 +152,6 @@ function isValidUsername(username: string): { valid: boolean; reason?: string } 
     return { valid: false, reason: "Use only letters, numbers, hyphens (-), and underscores (_). Spaces and special characters are not allowed." };
   }
   return { valid: true };
-}
-
-function checkEmailRateLimit(email: string): boolean {
-  const oneHourAgo = Date.now() - 60 * 60 * 1000;
-  const requests = (db.passwordResetRequests || []).filter(
-    r => r.email === email && new Date(r.createdAt).getTime() > oneHourAgo
-  );
-  return requests.length < 5;
 }
 
 // Authentication Middleware
@@ -376,228 +347,6 @@ app.post("/api/auth/logout", authenticateToken, (req, res) => {
   res.json({ success: true });
 });
 
-// Auth: Forgot Password - Step 1: Send 6-digit OTP
-app.post("/api/auth/forgot-password", async (req, res) => {
-  const { email } = req.body;
-
-  if (!isValidEmail(email)) {
-    res.status(400).json({ error: "Please enter a valid email address." });
-    return;
-  }
-
-  const normalizedEmail = email.trim().toLowerCase();
-
-  // Ensure array exists
-  if (!db.passwordResetRequests) {
-    db.passwordResetRequests = [];
-  }
-
-  // Check resend cooldown timer (60s)
-  const existingActive = db.passwordResetRequests.find(
-    r => r.email === normalizedEmail && !r.verified && r.expiresAt > Date.now()
-  );
-
-  if (existingActive && existingActive.resendCooldownUntil > Date.now()) {
-    const waitSec = Math.ceil((existingActive.resendCooldownUntil - Date.now()) / 1000);
-    res.status(429).json({ error: `Please wait ${waitSec} seconds before requesting a new OTP.` });
-    return;
-  }
-
-  // Rate limit: max 5 requests per hour
-  if (!checkEmailRateLimit(normalizedEmail)) {
-    res.status(429).json({ error: "Too many OTP requests. Please wait an hour before requesting again." });
-    return;
-  }
-
-  // Look up user (never reveal existence to caller)
-  const user = db.users.find(u => u.email.toLowerCase() === normalizedEmail);
-
-  if (!user) {
-    // Timing attack mitigation: simulate PBKDF2 calculation
-    hashPassword("dummy_timing_protection_password");
-    res.json({ message: "If an account exists with this email, an OTP has been sent." });
-    return;
-  }
-
-  // Invalidate any previous reset requests for this user
-  db.passwordResetRequests = db.passwordResetRequests.filter(r => r.userId !== user.id);
-
-  // Generate 6-digit cryptographic OTP
-  const otp = crypto.randomInt(100000, 1000000).toString();
-
-  // Securely hash OTP before saving
-  const { hash: otpHash, salt: otpSalt } = hashPassword(otp);
-
-  const resetRequest: PasswordResetRequest = {
-    id: `reset_${crypto.randomUUID()}`,
-    userId: user.id,
-    email: normalizedEmail,
-    otpHash,
-    otpSalt,
-    expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
-    attempts: 0,
-    resendCooldownUntil: Date.now() + 60 * 1000, // 60s cooldown
-    verified: false,
-    createdAt: new Date().toISOString()
-  };
-
-  db.passwordResetRequests.push(resetRequest);
-  saveDatabase();
-
-  // Dispatch OTP email (never log OTP to stdout)
-  try {
-    await EmailService.sendOtpEmail(normalizedEmail, otp);
-  } catch (err) {
-    console.error(`Failed to dispatch OTP email to ${maskEmail(normalizedEmail)}:`, err);
-  }
-
-  // Generic message: never reveal whether account was found
-  res.json({ message: "If an account exists with this email, an OTP has been sent." });
-});
-
-// Auth: Verify OTP - Step 2: Validate 6-digit OTP & generate one-time reset token
-app.post("/api/auth/verify-otp", (req, res) => {
-  const { email, otp } = req.body;
-
-  if (!isValidEmail(email)) {
-    res.status(400).json({ error: "Please enter a valid email address." });
-    return;
-  }
-
-  if (!otp || typeof otp !== "string" || !/^\d{6}$/.test(otp.trim())) {
-    res.status(400).json({ error: "OTP must be exactly 6 digits." });
-    return;
-  }
-
-  const normalizedEmail = email.trim().toLowerCase();
-  const cleanOtp = otp.trim();
-
-  if (!db.passwordResetRequests) {
-    db.passwordResetRequests = [];
-  }
-
-  const request = db.passwordResetRequests.find(
-    r => r.email === normalizedEmail && !r.verified
-  );
-
-  if (!request || request.expiresAt < Date.now()) {
-    res.status(400).json({ error: "Invalid or expired OTP. Please request a new one." });
-    return;
-  }
-
-  if (request.attempts >= 5) {
-    // Invalidate request
-    db.passwordResetRequests = db.passwordResetRequests.filter(r => r.id !== request.id);
-    saveDatabase();
-    res.status(429).json({ error: "Too many incorrect attempts. This OTP has been invalidated. Please request a new one." });
-    return;
-  }
-
-  request.attempts++;
-
-  const isValid = verifyPassword(cleanOtp, request.otpHash, request.otpSalt);
-  if (!isValid) {
-    saveDatabase();
-    if (request.attempts >= 5) {
-      db.passwordResetRequests = db.passwordResetRequests.filter(r => r.id !== request.id);
-      saveDatabase();
-      res.status(400).json({ error: "Too many incorrect attempts. This OTP has been invalidated. Please request a new one." });
-      return;
-    }
-    const remaining = 5 - request.attempts;
-    res.status(400).json({ error: `Invalid OTP. ${remaining} ${remaining === 1 ? "attempt" : "attempts"} remaining.` });
-    return;
-  }
-
-  // OTP verified: single-use. Invalidate OTP hash and issue ephemeral reset token.
-  request.verified = true;
-  request.otpHash = ""; // erase hashed OTP so it cannot be reused
-
-  const resetToken = crypto.randomBytes(32).toString("hex");
-  const { hash: tokenHash } = hashPassword(resetToken, request.otpSalt);
-  request.resetTokenHash = tokenHash;
-  request.resetTokenExpiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes to set new password
-
-  saveDatabase();
-
-  res.json({
-    message: "OTP verified successfully.",
-    resetToken
-  });
-});
-
-// Auth: Reset Password - Step 3: Set new password with verified reset token
-app.post("/api/auth/reset-password", (req, res) => {
-  const { email, resetToken, newPassword, confirmPassword } = req.body;
-
-  if (!isValidEmail(email)) {
-    res.status(400).json({ error: "Please provide a valid email address." });
-    return;
-  }
-
-  if (!resetToken || typeof resetToken !== "string") {
-    res.status(400).json({ error: "Reset verification token is missing or invalid." });
-    return;
-  }
-
-  if (!newPassword || typeof newPassword !== "string") {
-    res.status(400).json({ error: "New password is required." });
-    return;
-  }
-
-  if (newPassword !== confirmPassword) {
-    res.status(400).json({ error: "New password and confirmation do not match." });
-    return;
-  }
-
-  if (!isValidPassword(newPassword)) {
-    res.status(400).json({ error: "Password must be at least 8 characters long and contain both letters and numbers." });
-    return;
-  }
-
-  const normalizedEmail = email.trim().toLowerCase();
-
-  if (!db.passwordResetRequests) {
-    db.passwordResetRequests = [];
-  }
-
-  const request = db.passwordResetRequests.find(
-    r => r.email === normalizedEmail && r.verified
-  );
-
-  if (!request || !request.resetTokenExpiresAt || request.resetTokenExpiresAt < Date.now()) {
-    res.status(400).json({ error: "Reset session has expired. Please start the recovery process again." });
-    return;
-  }
-
-  const isTokenValid = request.resetTokenHash && verifyPassword(resetToken, request.resetTokenHash, request.otpSalt);
-  if (!isTokenValid) {
-    res.status(400).json({ error: "Invalid or expired reset session. Please request a new OTP." });
-    return;
-  }
-
-  const user = db.users.find(u => u.id === request.userId);
-  if (!user) {
-    res.status(404).json({ error: "User account associated with reset request not found." });
-    return;
-  }
-
-  // Hash new password
-  const { hash, salt } = hashPassword(newPassword);
-  user.passwordHash = hash;
-  user.passwordSalt = salt;
-
-  // Invalidate ALL existing sessions for this account
-  db.sessions = db.sessions.filter(s => s.userId !== user.id);
-
-  // Invalidate all reset requests for this account
-  db.passwordResetRequests = db.passwordResetRequests.filter(r => r.userId !== user.id);
-
-  saveDatabase();
-
-  res.json({ message: "Password changed successfully." });
-});
-
 // Auth: Change Password (Authenticated users)
 app.post("/api/auth/change-password", authenticateToken, (req, res) => {
   const user = (req as any).user as User;
@@ -781,6 +530,70 @@ app.post("/api/expenses", authenticateToken, (req, res) => {
   res.status(201).json(newExpense);
 });
 
+// Reorder expenses (User can ONLY reorder their own expenses)
+// NOTE: Must be declared BEFORE "/api/expenses/:id" so Express doesn't treat "reorder" as an ID param
+app.put("/api/expenses/reorder", authenticateToken, (req, res) => {
+  const user = (req as any).user as User;
+  const { orderedIds } = req.body;
+
+  if (!Array.isArray(orderedIds)) {
+    res.status(400).json({ error: "orderedIds must be an array of expense IDs." });
+    return;
+  }
+
+  const userExpenses = db.expenses.filter(e => e.userId === user.id);
+
+  // Validate format and ensure no empty or non-string IDs
+  for (const id of orderedIds) {
+    if (!id || typeof id !== "string") {
+      res.status(400).json({ error: "Invalid expense ID in orderedIds." });
+      return;
+    }
+  }
+
+  // Duplicate check
+  const uniqueIds = new Set(orderedIds);
+  if (uniqueIds.size !== orderedIds.length) {
+    res.status(400).json({ error: "Duplicate expense IDs in reorder request." });
+    return;
+  }
+
+  // Check unknown or unauthorized IDs
+  for (const id of orderedIds) {
+    const exp = db.expenses.find(e => e.id === id);
+    if (!exp) {
+      res.status(404).json({ error: `Expense with ID "${id}" not found.` });
+      return;
+    }
+    if (exp.userId !== user.id) {
+      res.status(403).json({ error: "Unauthorized: You attempted to reorder an expense that does not belong to you." });
+      return;
+    }
+  }
+
+  // If user has expenses, check that all user expenses are present in the reorder list
+  if (userExpenses.length > 0 && orderedIds.length !== userExpenses.length) {
+    res.status(400).json({ error: "All user expenses must be included in the reorder request." });
+    return;
+  }
+
+  // Update orders deterministically without altering other attributes
+  orderedIds.forEach((id, index) => {
+    const exp = db.expenses.find(e => e.id === id);
+    if (exp && exp.userId === user.id) {
+      exp.order = index;
+    }
+  });
+
+  saveDatabase();
+
+  const updatedExpenses = db.expenses
+    .filter(e => e.userId === user.id)
+    .sort((a, b) => a.order - b.order);
+
+  res.json(updatedExpenses);
+});
+
 // Edit an expense (User can ONLY edit their own expense)
 app.put("/api/expenses/:id", authenticateToken, (req, res) => {
   const user = (req as any).user as User;
@@ -858,43 +671,6 @@ app.delete("/api/expenses/:id", authenticateToken, (req, res) => {
   saveDatabase();
 
   res.json({ success: true, message: "Expense deleted successfully." });
-});
-
-// Reorder expenses (User can ONLY reorder their own expenses)
-app.put("/api/expenses/reorder", authenticateToken, (req, res) => {
-  const user = (req as any).user as User;
-  const { orderedIds } = req.body;
-
-  if (!Array.isArray(orderedIds)) {
-    res.status(400).json({ error: "orderedIds must be an array of expense IDs." });
-    return;
-  }
-
-  // Verify all IDs belong to this user
-  const userExpenseIds = new Set(db.expenses.filter(e => e.userId === user.id).map(e => e.id));
-  for (const id of orderedIds) {
-    if (!userExpenseIds.has(id)) {
-      res.status(403).json({ error: "Unauthorized: You attempted to reorder an expense that does not belong to you." });
-      return;
-    }
-  }
-
-  // Update orders
-  orderedIds.forEach((id, index) => {
-    const exp = db.expenses.find(e => e.id === id);
-    if (exp && exp.userId === user.id) {
-      exp.order = index;
-      exp.updatedAt = new Date().toISOString();
-    }
-  });
-
-  saveDatabase();
-
-  const updatedExpenses = db.expenses
-    .filter(e => e.userId === user.id)
-    .sort((a, b) => a.order - b.order);
-
-  res.json(updatedExpenses);
 });
 
 // --- PUBLIC ROUTES (ANYONE CAN VIEW WITHOUT LOGGING IN) ---

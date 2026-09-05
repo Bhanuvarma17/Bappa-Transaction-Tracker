@@ -4,9 +4,6 @@ import {
   Expense,
   CommitteePublicData,
   PublicCommitteeSummary,
-  ForgotPasswordResponse,
-  VerifyOtpResponse,
-  ResetPasswordResponse,
   ChangePasswordResponse,
 } from "./types";
 
@@ -98,32 +95,6 @@ export const api = {
     } finally {
       clearToken();
     }
-  },
-
-  async forgotPassword(email: string): Promise<ForgotPasswordResponse> {
-    return request<ForgotPasswordResponse>("/api/auth/forgot-password", {
-      method: "POST",
-      body: JSON.stringify({ email }),
-    });
-  },
-
-  async verifyOtp(payload: { email: string; otp: string }): Promise<VerifyOtpResponse> {
-    return request<VerifyOtpResponse>("/api/auth/verify-otp", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-  },
-
-  async resetPassword(payload: {
-    email: string;
-    resetToken: string;
-    newPassword: string;
-    confirmPassword: string;
-  }): Promise<ResetPasswordResponse> {
-    return request<ResetPasswordResponse>("/api/auth/reset-password", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
   },
 
   async changePassword(payload: {

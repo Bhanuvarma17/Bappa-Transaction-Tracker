@@ -57,9 +57,12 @@ export const FinanceSection: React.FC<FinanceSectionProps> = ({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [isReordering, setIsReordering] = useState(false);
 
-  const categories = Array.from(new Set(expenses.map((e) => e.category || "Miscellaneous")));
+  // Authoritative sort by persisted order property
+  const sortedExpenses = [...expenses].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 
-  const filteredExpenses = expenses.filter((item) => {
+  const categories = Array.from(new Set(sortedExpenses.map((e) => e.category || "Miscellaneous")));
+
+  const filteredExpenses = sortedExpenses.filter((item) => {
     const matchesSearch =
       item.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
       (item.notes && item.notes.toLowerCase().includes(searchTerm.toLowerCase()));
@@ -68,17 +71,23 @@ export const FinanceSection: React.FC<FinanceSectionProps> = ({
   });
 
   const handleMove = async (index: number, direction: "up" | "down") => {
-    if (direction === "up" && index === 0) return;
-    if (direction === "down" && index === expenses.length - 1) return;
+    if (direction === "up" && index <= 0) return;
+    if (direction === "down" && index >= sortedExpenses.length - 1) return;
 
     const targetIndex = direction === "up" ? index - 1 : index + 1;
-    const newExpenses = [...expenses];
+    const newExpenses = [...sortedExpenses];
     const [movedItem] = newExpenses.splice(index, 1);
     newExpenses.splice(targetIndex, 0, movedItem);
 
+    // Update each item's order field deterministically to match its new array index
+    const reorderedList = newExpenses.map((item, idx) => ({
+      ...item,
+      order: idx,
+    }));
+
     try {
       setIsReordering(true);
-      await onReorderExpenses(newExpenses);
+      await onReorderExpenses(reorderedList);
     } catch (err) {
       console.error("Failed to reorder expenses:", err);
     } finally {
@@ -212,9 +221,9 @@ export const FinanceSection: React.FC<FinanceSectionProps> = ({
 
           {/* Table Rows */}
           {filteredExpenses.map((expense) => {
-            const rawIndex = expenses.findIndex((e) => e.id === expense.id);
-            const isFirst = rawIndex === 0;
-            const isLast = rawIndex === expenses.length - 1;
+            const rawIndex = sortedExpenses.findIndex((e) => e.id === expense.id);
+            const isFirst = rawIndex <= 0;
+            const isLast = rawIndex >= sortedExpenses.length - 1;
 
             return (
               <div

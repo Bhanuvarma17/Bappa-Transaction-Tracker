@@ -57,19 +57,6 @@ export interface PublicCommitteeSummary {
   expensesCount: number;
 }
 
-export interface ForgotPasswordResponse {
-  message: string;
-}
-
-export interface VerifyOtpResponse {
-  message: string;
-  resetToken: string;
-}
-
-export interface ResetPasswordResponse {
-  message: string;
-}
-
 export interface ChangePasswordResponse {
   message: string;
 }

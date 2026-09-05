@@ -126,6 +126,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   // Reorder Expenses
   const handleReorderExpenses = async (newOrderedList: Expense[]) => {
+    const previousExpenses = [...expenses];
     // Optimistic UI update
     onUpdateExpensesState(newOrderedList);
     const orderedIds = newOrderedList.map((e) => e.id);
@@ -134,6 +135,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       onUpdateExpensesState(persisted);
       showNotification("Expense order updated on public profile.");
     } catch (err: any) {
+      onUpdateExpensesState(previousExpenses);
       showNotification(err.message || "Failed to save reordered list", "error");
       await onRefreshData();
     }
