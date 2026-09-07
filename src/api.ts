@@ -7,32 +7,28 @@ import {
   ChangePasswordResponse,
 } from "./types";
 
-const TOKEN_KEY = "ganesh_tracker_token";
-
+// No longer storing authentication tokens in localStorage; using secure HttpOnly cookies.
 export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  return null;
 }
 
-export function setToken(token: string) {
-  localStorage.setItem(TOKEN_KEY, token);
+export function setToken(_token?: string) {
+  // No-op for backward compatibility
 }
 
 export function clearToken() {
-  localStorage.removeItem(TOKEN_KEY);
+  // No-op for backward compatibility
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers || {});
-  const token = getToken();
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
   if (options.body && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
 
   const response = await fetch(endpoint, {
     ...options,
+    credentials: "include", // Ensure cookies are sent with every request
     headers,
   });
 
@@ -55,34 +51,27 @@ export const api = {
     displayName?: string;
     bio?: string;
     capital?: number;
-  }): Promise<{ user: User; profile: Profile; token: string }> {
-    const data = await request<{ user: User; profile: Profile; token: string }>("/api/auth/signup", {
+  }): Promise<{ user: User; profile: Profile }> {
+    return request<{ user: User; profile: Profile }>("/api/auth/signup", {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    setToken(data.token);
-    return data;
   },
 
   async login(payload: {
     identifier: string;
     password: string;
-  }): Promise<{ user: User; profile: Profile; token: string }> {
-    const data = await request<{ user: User; profile: Profile; token: string }>("/api/auth/login", {
+  }): Promise<{ user: User; profile: Profile }> {
+    return request<{ user: User; profile: Profile }>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    setToken(data.token);
-    return data;
   },
 
   async getMe(): Promise<{ user: User; profile: Profile } | null> {
-    const token = getToken();
-    if (!token) return null;
     try {
       return await request<{ user: User; profile: Profile }>("/api/auth/me");
     } catch {
-      clearToken();
       return null;
     }
   },
@@ -92,8 +81,6 @@ export const api = {
       await request("/api/auth/logout", { method: "POST" });
     } catch {
       // ignore
-    } finally {
-      clearToken();
     }
   },
 
@@ -102,13 +89,10 @@ export const api = {
     newPassword: string;
     confirmPassword: string;
   }): Promise<ChangePasswordResponse> {
-    const res = await request<ChangePasswordResponse>("/api/auth/change-password", {
+    return request<ChangePasswordResponse>("/api/auth/change-password", {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    // Successful change-password invalidates server-side sessions; clear local token
-    clearToken();
-    return res;
   },
 
   // Profile (Private)

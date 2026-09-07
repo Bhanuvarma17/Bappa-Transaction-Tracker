@@ -1,364 +1,504 @@
 import "dotenv/config";
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
+import cookieParser from "cookie-parser";
+import rateLimit from "express-rate-limit";
 import path from "path";
-import fs from "fs";
 import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
+import {
+  isDbConfigured,
+  query,
+  withTransaction,
+} from "./server/db";
+import {
+  hashPassword,
+  verifyPassword,
+  generateSessionToken,
+  hashSessionToken,
+  SESSION_COOKIE_NAME,
+  SESSION_DURATION_MS,
+} from "./server/auth";
 
-const app = express();
-const PORT = Number(process.env.PORT || 3000);
-
-
-app.use(express.json({ limit: "5mb" }));
-
-// --- PERSISTENT STORAGE SETUP ---
-
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
-const STORE_FILE = path.join(DATA_DIR, "store.json");
-
-interface User {
+interface AuthenticatedUser {
   id: string;
   email: string;
-  passwordHash: string;
-  passwordSalt: string;
   createdAt: string;
 }
 
-interface Profile {
-  userId: string;
-  username: string; // e.g., "SBVMB Youth"
-  normalizedUsername: string; // lowercase trimmed "sbvmb youth"
-  displayName: string;
-  bio: string;
-  profileImage: string;
-  capital: number;
-  currency: string;
-  updatedAt: string;
-}
-
-export interface Expense {
-  id: string;
-  userId: string;
-  title: string;
-  amount: number;
-  category: string;
-  date: string;
-  notes?: string;
-  order: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface Session {
-  token: string;
-  userId: string;
-  createdAt: string;
-  expiresAt: number;
-}
-
-interface DatabaseSchema {
-  users: User[];
-  profiles: Profile[];
-  expenses: Expense[];
-  sessions: Session[];
-}
-
-// In-memory state backed by disk
-let db: DatabaseSchema = {
-  users: [],
-  profiles: [],
-  expenses: [],
-  sessions: []
-};
-
-function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-}
-
-function loadDatabase() {
-  ensureDataDir();
-
-  if (fs.existsSync(STORE_FILE)) {
-    try {
-      const data = fs.readFileSync(STORE_FILE, "utf-8");
-      db = JSON.parse(data);
-
-      console.log(
-        `Database loaded: ${db.users.length} users, ${db.profiles.length} profiles, ${db.expenses.length} expenses.`
-      );
-
-      return;
-    } catch (err) {
-      console.error(
-        "Failed to parse store.json, initializing empty database:",
-        err
-      );
+declare global {
+  namespace Express {
+    interface Request {
+      user?: AuthenticatedUser;
     }
   }
-
-  console.log("No database found. Starting with an empty database.");
-
-  saveDatabase();
 }
 
-function saveDatabase() {
-  ensureDataDir();
+const app = express();
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = "0.0.0.0";
+const isProduction = process.env.NODE_ENV === "production";
+
+// Middleware
+app.use(cookieParser());
+app.use(express.json({ limit: "10mb" }));
+
+// Rate limiters for sensitive endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30, // 30 requests per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many authentication attempts. Please try again in a few minutes." },
+});
+
+const changePasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many password change attempts. Please try again in 15 minutes." },
+});
+
+// Periodic expired session cleanup (every 1 hour)
+setInterval(async () => {
   try {
-    const tempFile = `${STORE_FILE}.tmp`;
-    fs.writeFileSync(tempFile, JSON.stringify(db, null, 2), "utf-8");
-    fs.renameSync(tempFile, STORE_FILE);
-  } catch (err) {
-    console.error("Failed to save database:", err);
+    if (isDbConfigured()) {
+      await query("DELETE FROM sessions WHERE expires_at < NOW()");
+    }
+  } catch (err: any) {
+    console.error("Failed to clean up expired sessions:", err.message);
   }
+}, 60 * 60 * 1000);
+
+// Helper to format an expense row from PostgreSQL to client structure
+function formatExpense(row: any) {
+  let formattedDate: string;
+  if (row.date instanceof Date) {
+    formattedDate = row.date.toISOString().split("T")[0];
+  } else if (typeof row.date === "string") {
+    formattedDate = row.date.split("T")[0];
+  } else {
+    formattedDate = new Date().toISOString().split("T")[0];
+  }
+
+  return {
+    id: row.id,
+    userId: row.user_id,
+    title: row.title,
+    amount: parseFloat(row.amount),
+    category: row.category,
+    date: formattedDate,
+    notes: row.notes || "",
+    order: Number(row.expense_order ?? 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
-// Password hashing with Node's crypto
-function hashPassword(password: string, salt?: string): { hash: string; salt: string } {
-  const generatedSalt = salt || crypto.randomBytes(16).toString("hex");
-  const hash = crypto.pbkdf2Sync(password, generatedSalt, 1000, 64, "sha512").toString("hex");
-  return { hash, salt: generatedSalt };
-}
-
-function verifyPassword(password: string, hash: string, salt: string): boolean {
-  const computedHash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
-  return computedHash === hash;
-}
-
-function isValidEmail(email: string): boolean {
-  if (!email || typeof email !== "string") return false;
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email.trim());
-}
-
-function isValidPassword(password: string): boolean {
-  return typeof password === "string" && password.length >= 8 && /[A-Za-z]/.test(password) && /[0-9]/.test(password);
-}
-
-// Strict username validation: only letters, digits, hyphens, underscores. 3–40 chars. NO spaces.
-function isValidUsername(username: string): { valid: boolean; reason?: string } {
-  if (!username || typeof username !== "string") {
-    return { valid: false, reason: "Committee name is required." };
-  }
-  const trimmed = username.trim();
-  if (trimmed.length < 3) {
-    return { valid: false, reason: "Committee name must be at least 3 characters." };
-  }
-  if (trimmed.length > 40) {
-    return { valid: false, reason: "Committee name must be 40 characters or fewer." };
-  }
-  if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) {
-    return { valid: false, reason: "Use only letters, numbers, hyphens (-), and underscores (_). Spaces and special characters are not allowed." };
-  }
-  return { valid: true };
+// Helper to format a profile row from PostgreSQL
+function formatProfile(row: any) {
+  return {
+    userId: row.user_id,
+    username: row.username,
+    normalizedUsername: row.normalized_username,
+    displayName: row.display_name || row.username,
+    bio: row.bio || "",
+    profileImage: row.profile_image || "",
+    capital: parseFloat(row.capital),
+    currency: row.currency || "₹",
+    updatedAt: row.updated_at,
+  };
 }
 
 // Authentication Middleware
-function authenticateToken(req: express.Request, res: express.Response, next: express.NextFunction) {
+async function authenticateToken(req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (!isDbConfigured()) {
+    res.status(503).json({ error: "Database is not configured. Please set DATABASE_URL." });
+    return;
+  }
+
+  const cookieToken = req.cookies[SESSION_COOKIE_NAME];
   const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
+  const bearerToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
 
-  if (!token) {
-    res.status(401).json({ error: "Authentication required. Please log in." });
+  const rawToken = cookieToken || bearerToken;
+  if (!rawToken) {
+    res.status(401).json({ error: "Authentication required." });
     return;
   }
 
-  const session = db.sessions.find(s => s.token === token);
-  if (!session || session.expiresAt < Date.now()) {
-    res.status(401).json({ error: "Session expired or invalid. Please log in again." });
-    return;
-  }
+  try {
+    const tokenHash = hashSessionToken(rawToken);
 
-  const user = db.users.find(u => u.id === session.userId);
-  if (!user) {
-    res.status(401).json({ error: "User associated with session not found." });
-    return;
-  }
+    const sessionResult = await query(
+      `SELECT s.token_hash, s.user_id, s.expires_at, u.id, u.email, u.created_at
+       FROM sessions s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = $1`,
+      [tokenHash]
+    );
 
-  (req as any).user = user;
-  next();
+    if (sessionResult.rows.length === 0) {
+      res.clearCookie(SESSION_COOKIE_NAME, {
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: "lax",
+        path: "/",
+      });
+      res.status(401).json({ error: "Session invalid or expired. Please log in again." });
+      return;
+    }
+
+    const sessionRow = sessionResult.rows[0];
+    const expiresAt = new Date(sessionRow.expires_at).getTime();
+
+    if (expiresAt < Date.now()) {
+      await query("DELETE FROM sessions WHERE token_hash = $1", [tokenHash]).catch(() => {});
+      res.clearCookie(SESSION_COOKIE_NAME, {
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: "lax",
+        path: "/",
+      });
+      res.status(401).json({ error: "Session expired. Please log in again." });
+      return;
+    }
+
+    req.user = {
+      id: sessionRow.id,
+      email: sessionRow.email,
+      createdAt: sessionRow.created_at,
+    };
+
+    // Proceed to next handler exactly once
+    next();
+  } catch (err: any) {
+    console.error("Authentication error:", err.message);
+    res.status(500).json({ error: "Authentication service failure." });
+  }
 }
 
-// --- API ROUTES ---
+// ----------------------------------------------------
+// API ROUTES
+// ----------------------------------------------------
 
-// Health Check
-app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", time: new Date().toISOString() });
-});
-
-// Auth: Sign Up
-app.post("/api/auth/signup", (req, res) => {
-  const { email, password, username, displayName, bio, capital } = req.body;
-
-  if (!email || typeof email !== "string" || !email.includes("@")) {
-    res.status(400).json({ error: "Valid email address is required." });
-    return;
-  }
-
-  if (!password || typeof password !== "string" || password.length < 6) {
-    res.status(400).json({ error: "Password must be at least 6 characters long." });
-    return;
-  }
-
-  if (!username || typeof username !== "string" || !username.trim()) {
-    res.status(400).json({ error: "Committee name is required." });
-    return;
-  }
-
-  const trimmedUsername = username.trim();
-  const normalizedUsername = trimmedUsername.toLowerCase();
-
-  // Strict username validation: only A-Za-z0-9_- (NO spaces), 3–40 chars
-  const usernameCheck = isValidUsername(trimmedUsername);
-  if (!usernameCheck.valid) {
-    res.status(400).json({ error: usernameCheck.reason });
-    return;
-  }
-
-  // Check unique email
-  if (db.users.some(u => u.email.toLowerCase() === email.trim().toLowerCase())) {
-    res.status(400).json({ error: "An account with this email already exists. Please log in." });
-    return;
-  }
-
-  // Check unique username (case-insensitive)
-  if (db.profiles.some(p => p.normalizedUsername === normalizedUsername)) {
-    res.status(400).json({ error: `The committee name / username "${trimmedUsername}" is already taken. Please choose another.` });
-    return;
-  }
-
-  // Create User
-  const userId = `user_${crypto.randomUUID()}`;
-  const { hash, salt } = hashPassword(password);
-  const newUser: User = {
-    id: userId,
-    email: email.trim().toLowerCase(),
-    passwordHash: hash,
-    passwordSalt: salt,
-    createdAt: new Date().toISOString()
-  };
-  db.users.push(newUser);
-
-  // Create Profile
-  const initialCapital = typeof capital === "number" && capital >= 0 ? capital : 50000;
-  const newProfile: Profile = {
-    userId,
-    username: trimmedUsername,
-    normalizedUsername,
-    displayName: (displayName && typeof displayName === "string" && displayName.trim()) || trimmedUsername,
-    bio: (bio && typeof bio === "string") ? bio.trim() : "Vinayaka Chavithi celebration committee finances and expense records.",
-    profileImage: "https://images.unsplash.com/photo-1567591414240-e14f6b1eefb5?w=400&auto=format&fit=crop&q=80",
-    capital: initialCapital,
-    currency: "₹",
-    updatedAt: new Date().toISOString()
-  };
-  db.profiles.push(newProfile);
-
-  // Create Session Token
-  const token = crypto.randomBytes(32).toString("hex");
-  const session: Session = {
-    token,
-    userId,
-    createdAt: new Date().toISOString(),
-    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 // 30 days
-  };
-  db.sessions.push(session);
-
-  saveDatabase();
-
-  res.status(201).json({
-    token,
-    user: { id: newUser.id, email: newUser.email },
-    profile: newProfile
+// 1. Health check
+app.get("/api/health", async (req: Request, res: Response) => {
+  const dbStatus = isDbConfigured();
+  res.json({
+    status: "ok",
+    database: dbStatus ? "configured" : "unconfigured",
+    environment: process.env.NODE_ENV || "development",
   });
 });
 
-// Auth: Login
-app.post("/api/auth/login", (req, res) => {
-  const { identifier, password } = req.body;
-
-  if (!identifier || !password) {
-    res.status(400).json({ error: "Please enter your email/username and password." });
+// 2. Public committee username availability check
+app.get("/api/auth/check-username", async (req: Request, res: Response) => {
+  if (!isDbConfigured()) {
+    res.status(503).json({ error: "Database not configured." });
     return;
   }
 
-  const cleanIdent = String(identifier).trim().toLowerCase();
+  const rawUsername = typeof req.query.username === "string" ? req.query.username : "";
+  const cleanUsername = rawUsername.trim();
 
-  // Find user by email or by profile username
-  let targetUser = db.users.find(u => u.email.toLowerCase() === cleanIdent);
-  if (!targetUser) {
-    const profile = db.profiles.find(p => p.normalizedUsername === cleanIdent);
-    if (profile) {
-      targetUser = db.users.find(u => u.id === profile.userId);
+  if (!cleanUsername) {
+    res.status(400).json({ error: "Username query parameter is required." });
+    return;
+  }
+
+  const normalized = cleanUsername.toLowerCase();
+  const valid = /^[a-zA-Z0-9_-]+$/.test(cleanUsername);
+
+  if (!valid || cleanUsername.length < 3 || cleanUsername.length > 40) {
+    res.json({
+      available: false,
+      message: "Committee name must be 3-40 alphanumeric characters, hyphens, or underscores.",
+    });
+    return;
+  }
+
+  try {
+    const result = await query(
+      "SELECT user_id FROM profiles WHERE normalized_username = $1",
+      [normalized]
+    );
+
+    const isAvailable = result.rows.length === 0;
+    res.json({
+      available: isAvailable,
+      normalizedUsername: normalized,
+      message: isAvailable ? "Committee name is available!" : "Committee name is already taken.",
+    });
+  } catch (err: any) {
+    console.error("Error checking username availability:", err.message);
+    res.status(500).json({ error: "Failed to check username availability." });
+  }
+});
+
+// 3. Signup
+app.post("/api/auth/signup", authLimiter, async (req: Request, res: Response) => {
+  if (!isDbConfigured()) {
+    res.status(503).json({ error: "Database is not configured. Please set DATABASE_URL." });
+    return;
+  }
+
+  const { email, password, username, displayName, capital } = req.body || {};
+
+  // Validation
+  const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+  if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) || cleanEmail.length > 255) {
+    res.status(400).json({ error: "A valid email address is required." });
+    return;
+  }
+
+  if (typeof password !== "string" || password.length < 6 || password.length > 128) {
+    res.status(400).json({ error: "Password must be between 6 and 128 characters." });
+    return;
+  }
+
+  const cleanUsername = typeof username === "string" ? username.trim() : "";
+  if (!cleanUsername || !/^[a-zA-Z0-9_-]{3,40}$/.test(cleanUsername)) {
+    res.status(400).json({
+      error: "Username must be 3 to 40 characters containing letters, numbers, hyphens, or underscores.",
+    });
+    return;
+  }
+  const normalizedUsername = cleanUsername.toLowerCase();
+
+  const cleanDisplayName =
+    typeof displayName === "string" && displayName.trim().length > 0
+      ? displayName.trim().slice(0, 100)
+      : cleanUsername;
+
+  const numCapital = typeof capital === "number" ? capital : parseFloat(capital);
+  const validatedCapital = isNaN(numCapital) || numCapital < 0 ? 50000 : Math.min(numCapital, 1000000000);
+
+  try {
+    const { user, profile, rawToken } = await withTransaction(async (client) => {
+      // Check existing email
+      const emailCheck = await client.query(
+        "SELECT id FROM users WHERE LOWER(email) = $1",
+        [cleanEmail]
+      );
+      if (emailCheck.rows.length > 0) {
+        throw { status: 400, message: "An account with this email already exists." };
+      }
+
+      // Check existing username
+      const usernameCheck = await client.query(
+        "SELECT user_id FROM profiles WHERE normalized_username = $1",
+        [normalizedUsername]
+      );
+      if (usernameCheck.rows.length > 0) {
+        throw { status: 400, message: "This committee username is already taken. Please choose another." };
+      }
+
+      const userId = `user_${crypto.randomUUID()}`;
+      const { hash, salt } = await hashPassword(password);
+
+      // Insert user
+      const userRes = await client.query(
+        `INSERT INTO users (id, email, password_hash, password_salt, created_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         RETURNING id, email, created_at`,
+        [userId, cleanEmail, hash, salt]
+      );
+
+      // Insert profile
+      const profileRes = await client.query(
+        `INSERT INTO profiles (user_id, username, normalized_username, display_name, bio, profile_image, capital, currency, updated_at)
+         VALUES ($1, $2, $3, $4, '', '', $5, '₹', NOW())
+         RETURNING user_id, username, normalized_username, display_name, bio, profile_image, capital, currency, updated_at`,
+        [userId, cleanUsername, normalizedUsername, cleanDisplayName, validatedCapital]
+      );
+
+      // Create session
+      const { rawToken: token, tokenHash } = generateSessionToken();
+      const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
+
+      await client.query(
+        `INSERT INTO sessions (token_hash, user_id, created_at, expires_at)
+         VALUES ($1, $2, NOW(), $3)`,
+        [tokenHash, userId, expiresAt]
+      );
+
+      return {
+        user: {
+          id: userRes.rows[0].id,
+          email: userRes.rows[0].email,
+          createdAt: userRes.rows[0].created_at,
+        },
+        profile: formatProfile(profileRes.rows[0]),
+        rawToken: token,
+      };
+    });
+
+    // Set secure HttpOnly cookie
+    res.cookie(SESSION_COOKIE_NAME, rawToken, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: "lax",
+      maxAge: SESSION_DURATION_MS,
+      path: "/",
+    });
+
+    res.status(201).json({ user, profile });
+  } catch (err: any) {
+    if (err.status) {
+      res.status(err.status).json({ error: err.message });
+    } else {
+      console.error("Signup error:", err.message);
+      res.status(500).json({ error: "An unexpected error occurred during account creation." });
+    }
+  }
+});
+
+// 4. Login
+app.post("/api/auth/login", authLimiter, async (req: Request, res: Response) => {
+  if (!isDbConfigured()) {
+    res.status(503).json({ error: "Database is not configured. Please set DATABASE_URL." });
+    return;
+  }
+
+  const { identifier, password } = req.body || {};
+
+  const cleanIdentifier = typeof identifier === "string" ? identifier.trim() : "";
+  if (!cleanIdentifier || typeof password !== "string" || !password) {
+    res.status(400).json({ error: "Username/email and password are required." });
+    return;
+  }
+
+  try {
+    let userQuery = "";
+    let params: any[] = [];
+
+    if (cleanIdentifier.includes("@")) {
+      userQuery = "SELECT * FROM users WHERE LOWER(email) = LOWER($1)";
+      params = [cleanIdentifier];
+    } else {
+      userQuery = `
+        SELECT u.* FROM users u
+        JOIN profiles p ON p.user_id = u.id
+        WHERE p.normalized_username = LOWER($1)
+      `;
+      params = [cleanIdentifier];
+    }
+
+    const userResult = await query(userQuery, params);
+    if (userResult.rows.length === 0) {
+      res.status(401).json({ error: "Invalid credentials. Please check your username/email and password." });
+      return;
+    }
+
+    const userRow = userResult.rows[0];
+    const { valid, needsRehash } = await verifyPassword(password, userRow.password_hash, userRow.password_salt);
+
+    if (!valid) {
+      res.status(401).json({ error: "Invalid credentials. Please check your username/email and password." });
+      return;
+    }
+
+    // Opportunistically upgrade hash to Argon2id if it was legacy PBKDF2
+    if (needsRehash) {
+      const { hash, salt } = await hashPassword(password);
+      await query(
+        "UPDATE users SET password_hash = $1, password_salt = $2 WHERE id = $3",
+        [hash, salt, userRow.id]
+      ).catch(() => {});
+    }
+
+    // Fetch profile
+    const profileResult = await query("SELECT * FROM profiles WHERE user_id = $1", [userRow.id]);
+    if (profileResult.rows.length === 0) {
+      res.status(500).json({ error: "Profile not found for this account." });
+      return;
+    }
+
+    // Create session in PostgreSQL
+    const { rawToken, tokenHash } = generateSessionToken();
+    const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
+
+    await query(
+      `INSERT INTO sessions (token_hash, user_id, created_at, expires_at)
+       VALUES ($1, $2, NOW(), $3)`,
+      [tokenHash, userRow.id, expiresAt]
+    );
+
+    // Set secure HttpOnly cookie
+    res.cookie(SESSION_COOKIE_NAME, rawToken, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: "lax",
+      maxAge: SESSION_DURATION_MS,
+      path: "/",
+    });
+
+    const user = {
+      id: userRow.id,
+      email: userRow.email,
+      createdAt: userRow.created_at,
+    };
+    const profile = formatProfile(profileResult.rows[0]);
+
+    res.json({ user, profile });
+  } catch (err: any) {
+    console.error("Login error:", err.message);
+    res.status(500).json({ error: "Login failed. Please try again." });
+  }
+});
+
+// 5. Logout
+app.post("/api/auth/logout", async (req: Request, res: Response) => {
+  const cookieToken = req.cookies[SESSION_COOKIE_NAME];
+  const authHeader = req.headers["authorization"];
+  const bearerToken = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7).trim() : null;
+  const rawToken = cookieToken || bearerToken;
+
+  if (rawToken && isDbConfigured()) {
+    try {
+      const tokenHash = hashSessionToken(rawToken);
+      await query("DELETE FROM sessions WHERE token_hash = $1", [tokenHash]);
+    } catch (err: any) {
+      console.error("Logout session deletion error:", err.message);
     }
   }
 
-  if (!targetUser) {
-    res.status(401).json({ error: "Invalid credentials. No user found with that email or username." });
-    return;
-  }
-
-  const valid = verifyPassword(password, targetUser.passwordHash, targetUser.passwordSalt);
-  if (!valid) {
-    res.status(401).json({ error: "Incorrect password. Please try again." });
-    return;
-  }
-
-  const profile = db.profiles.find(p => p.userId === targetUser!.id);
-
-  // Create Session Token
-  const token = crypto.randomBytes(32).toString("hex");
-  const session: Session = {
-    token,
-    userId: targetUser.id,
-    createdAt: new Date().toISOString(),
-    expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
-  };
-  db.sessions.push(session);
-
-  saveDatabase();
-
-  res.json({
-    token,
-    user: { id: targetUser.id, email: targetUser.email },
-    profile: profile || null
+  res.clearCookie(SESSION_COOKIE_NAME, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: "lax",
+    path: "/",
   });
+
+  res.json({ message: "Logged out successfully" });
 });
 
-// Auth: Me
-app.get("/api/auth/me", authenticateToken, (req, res) => {
-  const user = (req as any).user as User;
-  const profile = db.profiles.find(p => p.userId === user.id);
-  res.json({
-    user: { id: user.id, email: user.email },
-    profile: profile || null
-  });
-});
+// 6. Get Current Authenticated User & Profile (/api/auth/me)
+app.get("/api/auth/me", authenticateToken, async (req: Request, res: Response) => {
+  try {
+    const profileRes = await query("SELECT * FROM profiles WHERE user_id = $1", [req.user!.id]);
+    if (profileRes.rows.length === 0) {
+      res.status(404).json({ error: "Profile not found." });
+      return;
+    }
 
-// Auth: Logout
-app.post("/api/auth/logout", authenticateToken, (req, res) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
-  if (token) {
-    db.sessions = db.sessions.filter(s => s.token !== token);
-    saveDatabase();
+    res.json({
+      user: req.user,
+      profile: formatProfile(profileRes.rows[0]),
+    });
+  } catch (err: any) {
+    console.error("Error in /api/auth/me:", err.message);
+    res.status(500).json({ error: "Failed to retrieve authenticated user." });
   }
-  res.json({ success: true });
 });
 
-// Auth: Change Password (Authenticated users)
-app.post("/api/auth/change-password", authenticateToken, (req, res) => {
-  const user = (req as any).user as User;
-  const { currentPassword, newPassword, confirmPassword } = req.body;
+// 7. Change Password
+app.post("/api/auth/change-password", changePasswordLimiter, authenticateToken, async (req: Request, res: Response) => {
+  const { currentPassword, newPassword, confirmPassword } = req.body || {};
 
-  if (!currentPassword || typeof currentPassword !== "string") {
-    res.status(400).json({ error: "Current password is required." });
-    return;
-  }
-
-  if (!newPassword || typeof newPassword !== "string") {
-    res.status(400).json({ error: "New password is required." });
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    res.status(400).json({ error: "All password fields are required." });
     return;
   }
 
@@ -367,421 +507,540 @@ app.post("/api/auth/change-password", authenticateToken, (req, res) => {
     return;
   }
 
-  if (!isValidPassword(newPassword)) {
-    res.status(400).json({ error: "New password must be at least 8 characters long and contain both letters and numbers." });
+  if (typeof newPassword !== "string" || newPassword.length < 6 || newPassword.length > 128) {
+    res.status(400).json({ error: "New password must be between 6 and 128 characters." });
     return;
   }
 
-  // Verify current password
-  const isCurrentCorrect = verifyPassword(currentPassword, user.passwordHash, user.passwordSalt);
-  if (!isCurrentCorrect) {
-    res.status(400).json({ error: "Incorrect current password. Please try again." });
+  if (newPassword === currentPassword) {
+    res.status(400).json({ error: "New password must be different from current password." });
     return;
   }
 
-  // Prevent re-using same password
-  if (verifyPassword(newPassword, user.passwordHash, user.passwordSalt)) {
-    res.status(400).json({ error: "New password must be different from your current password." });
-    return;
+  try {
+    const userRes = await query("SELECT * FROM users WHERE id = $1", [req.user!.id]);
+    if (userRes.rows.length === 0) {
+      res.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    const userRow = userRes.rows[0];
+    const { valid } = await verifyPassword(currentPassword, userRow.password_hash, userRow.password_salt);
+    if (!valid) {
+      res.status(400).json({ error: "Current password is incorrect." });
+      return;
+    }
+
+    const { hash, salt } = await hashPassword(newPassword);
+
+    // Update password and invalidate all existing sessions within a transaction
+    await withTransaction(async (client) => {
+      await client.query(
+        "UPDATE users SET password_hash = $1, password_salt = $2 WHERE id = $3",
+        [hash, salt, req.user!.id]
+      );
+      await client.query("DELETE FROM sessions WHERE user_id = $1", [req.user!.id]);
+    });
+
+    res.clearCookie(SESSION_COOKIE_NAME, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: "lax",
+      path: "/",
+    });
+
+    res.json({ message: "Password updated successfully! Please log in again with your new password." });
+  } catch (err: any) {
+    console.error("Change password error:", err.message);
+    res.status(500).json({ error: "Failed to update password." });
   }
-
-  // Update password securely
-  const { hash, salt } = hashPassword(newPassword);
-  user.passwordHash = hash;
-  user.passwordSalt = salt;
-
-  // Invalidate ALL existing sessions for this user
-  db.sessions = db.sessions.filter(s => s.userId !== user.id);
-
-  saveDatabase();
-
-  res.json({ message: "Password changed successfully." });
 });
 
-// --- PROFILE MANAGEMENT (PRIVATE - USER CAN ONLY EDIT OWN PROFILE) ---
-app.put("/api/profile", authenticateToken, (req, res) => {
-  const user = (req as any).user as User;
-  const profileIndex = db.profiles.findIndex(p => p.userId === user.id);
-
-  if (profileIndex === -1) {
-    res.status(404).json({ error: "Profile not found." });
-    return;
+// 8. Get Profile
+app.get("/api/profile", authenticateToken, async (req: Request, res: Response) => {
+  try {
+    const result = await query("SELECT * FROM profiles WHERE user_id = $1", [req.user!.id]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: "Profile not found." });
+      return;
+    }
+    res.json(formatProfile(result.rows[0]));
+  } catch (err: any) {
+    console.error("Error fetching profile:", err.message);
+    res.status(500).json({ error: "Failed to fetch profile." });
   }
+});
 
-  const currentProfile = db.profiles[profileIndex];
-  const { username, displayName, bio, profileImage, capital, currency } = req.body;
+// 9. Update Profile
+app.put("/api/profile", authenticateToken, async (req: Request, res: Response) => {
+  const { displayName, bio, profileImage, capital, currency, username } = req.body || {};
 
-  // If username is changing, ensure strict format and uniqueness
-  if (username && typeof username === "string") {
-    const trimmedUsername = username.trim();
-    if (!trimmedUsername) {
-      res.status(400).json({ error: "Committee name cannot be empty." });
+  try {
+    const existing = await query("SELECT * FROM profiles WHERE user_id = $1", [req.user!.id]);
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: "Profile not found." });
       return;
     }
+    const currentProfile = existing.rows[0];
 
-    // Strict validation: only A-Za-z0-9_- (NO spaces), 3–40 chars
-    const usernameCheck = isValidUsername(trimmedUsername);
-    if (!usernameCheck.valid) {
-      res.status(400).json({ error: usernameCheck.reason });
-      return;
-    }
+    let newUsername = currentProfile.username;
+    let newNormalizedUsername = currentProfile.normalized_username;
 
-    const normalized = trimmedUsername.toLowerCase();
-    if (normalized !== currentProfile.normalizedUsername) {
-      // Case-insensitive uniqueness check — exclude this user's own profile
-      const exists = db.profiles.some(p => p.userId !== user.id && p.normalizedUsername === normalized);
-      if (exists) {
-        res.status(400).json({ error: `The committee name "${trimmedUsername}" is already taken. Please choose a different name.` });
+    if (username !== undefined && typeof username === "string") {
+      const cleanUsername = username.trim();
+      if (!/^[a-zA-Z0-9_-]{3,40}$/.test(cleanUsername)) {
+        res.status(400).json({
+          error: "Username must be 3 to 40 characters containing letters, numbers, hyphens, or underscores.",
+        });
         return;
       }
-      currentProfile.username = trimmedUsername;
-      currentProfile.normalizedUsername = normalized;
+      const norm = cleanUsername.toLowerCase();
+      if (norm !== currentProfile.normalized_username) {
+        const check = await query(
+          "SELECT user_id FROM profiles WHERE normalized_username = $1 AND user_id != $2",
+          [norm, req.user!.id]
+        );
+        if (check.rows.length > 0) {
+          res.status(400).json({ error: "This committee username is already taken." });
+          return;
+        }
+        newUsername = cleanUsername;
+        newNormalizedUsername = norm;
+      }
     }
-  }
 
-  if (displayName !== undefined && typeof displayName === "string") {
-    currentProfile.displayName = displayName.trim() || currentProfile.username;
-  }
+    const newDisplayName =
+      displayName !== undefined && typeof displayName === "string"
+        ? displayName.trim().slice(0, 100)
+        : currentProfile.display_name;
 
-  if (bio !== undefined && typeof bio === "string") {
-    currentProfile.bio = bio.trim();
-  }
+    const newBio =
+      bio !== undefined && typeof bio === "string"
+        ? bio.trim().slice(0, 500)
+        : currentProfile.bio;
 
-  if (profileImage !== undefined && typeof profileImage === "string") {
-    currentProfile.profileImage = profileImage.trim();
-  }
+    const newProfileImage =
+      profileImage !== undefined && typeof profileImage === "string"
+        ? profileImage.trim().slice(0, 200000)
+        : currentProfile.profile_image;
 
-  if (capital !== undefined) {
-    const capNum = Number(capital);
-    if (isNaN(capNum) || capNum < 0) {
-      res.status(400).json({ error: "Capital budget must be a positive number." });
-      return;
+    let newCapital = parseFloat(currentProfile.capital);
+    if (capital !== undefined) {
+      const num = typeof capital === "number" ? capital : parseFloat(capital);
+      if (!isNaN(num) && num >= 0) {
+        newCapital = Math.min(num, 1000000000);
+      }
     }
-    currentProfile.capital = capNum;
+
+    const newCurrency =
+      currency !== undefined && typeof currency === "string"
+        ? currency.trim().slice(0, 10)
+        : currentProfile.currency;
+
+    const updateRes = await query(
+      `UPDATE profiles
+       SET username = $1,
+           normalized_username = $2,
+           display_name = $3,
+           bio = $4,
+           profile_image = $5,
+           capital = $6,
+           currency = $7,
+           updated_at = NOW()
+       WHERE user_id = $8
+       RETURNING *`,
+      [
+        newUsername,
+        newNormalizedUsername,
+        newDisplayName,
+        newBio,
+        newProfileImage,
+        newCapital,
+        newCurrency,
+        req.user!.id,
+      ]
+    );
+
+    res.json(formatProfile(updateRes.rows[0]));
+  } catch (err: any) {
+    console.error("Error updating profile:", err.message);
+    res.status(500).json({ error: "Failed to update profile." });
   }
-
-  if (currency !== undefined && typeof currency === "string") {
-    currentProfile.currency = currency.trim() || "₹";
-  }
-
-  currentProfile.updatedAt = new Date().toISOString();
-  db.profiles[profileIndex] = currentProfile;
-  saveDatabase();
-
-  res.json({ profile: currentProfile });
 });
 
-// --- EXPENSES MANAGEMENT (PRIVATE - STRICT OWNERSHIP ENFORCED) ---
+// 10. Get Expenses for Authenticated User
+app.get("/api/expenses", authenticateToken, async (req: Request, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT id, user_id, title, amount, category, date, notes, expense_order, created_at, updated_at
+       FROM expenses
+       WHERE user_id = $1
+       ORDER BY expense_order ASC, created_at ASC`,
+      [req.user!.id]
+    );
 
-// Get all expenses for logged-in user (in user-defined order)
-app.get("/api/expenses", authenticateToken, (req, res) => {
-  const user = (req as any).user as User;
-  const userExpenses = db.expenses
-    .filter(e => e.userId === user.id)
-    .sort((a, b) => a.order - b.order);
-  res.json(userExpenses);
+    const expenses = result.rows.map(formatExpense);
+    res.json(expenses);
+  } catch (err: any) {
+    console.error("Error fetching expenses:", err.message);
+    res.status(500).json({ error: "Failed to fetch expenses." });
+  }
 });
 
-// Add an expense
-app.post("/api/expenses", authenticateToken, (req, res) => {
-  const user = (req as any).user as User;
-  const { title, amount, category, date, notes } = req.body;
+// 11. Create Expense
+app.post("/api/expenses", authenticateToken, async (req: Request, res: Response) => {
+  const { title, amount, category, date, notes } = req.body || {};
 
-  // Check 90 expenses limit rule
-  const currentCount = db.expenses.filter(e => e.userId === user.id).length;
-  if (currentCount >= 90) {
-    res.status(400).json({ error: "Maximum limit reached: You cannot add more than 90 expenses per profile." });
+  const cleanTitle = typeof title === "string" ? title.trim() : "";
+  if (!cleanTitle || cleanTitle.length > 200) {
+    res.status(400).json({ error: "Expense description is required (maximum 200 characters)." });
     return;
   }
 
-  // Validate title: Empty expense titles should not be accepted
-  if (!title || typeof title !== "string" || !title.trim()) {
-    res.status(400).json({ error: "Expense title cannot be empty." });
+  const numAmount = typeof amount === "number" ? amount : parseFloat(amount);
+  if (isNaN(numAmount) || numAmount <= 0 || numAmount > 1000000000) {
+    res.status(400).json({ error: "Please enter a valid positive expense amount." });
     return;
   }
 
-  const parsedAmount = Number(amount);
-  if (isNaN(parsedAmount) || parsedAmount <= 0) {
-    res.status(400).json({ error: "Expense amount must be greater than 0." });
-    return;
+  const cleanCategory =
+    typeof category === "string" && category.trim().length > 0
+      ? category.trim().slice(0, 100)
+      : "Miscellaneous";
+
+  const cleanDate =
+    typeof date === "string" && /^\d{4}-\d{2}-\d{2}/.test(date)
+      ? date.slice(0, 10)
+      : new Date().toISOString().split("T")[0];
+
+  const cleanNotes = typeof notes === "string" ? notes.trim().slice(0, 1000) : "";
+
+  try {
+    const newExpense = await withTransaction(async (client) => {
+      // Find the next available order index for this user
+      const maxRes = await client.query(
+        "SELECT COALESCE(MAX(expense_order), -1) AS max_order FROM expenses WHERE user_id = $1",
+        [req.user!.id]
+      );
+      const nextOrder = Number(maxRes.rows[0].max_order) + 1;
+      const expenseId = `exp_${crypto.randomUUID()}`;
+
+      const insertRes = await client.query(
+        `INSERT INTO expenses (id, user_id, title, amount, category, date, notes, expense_order, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+         RETURNING id, user_id, title, amount, category, date, notes, expense_order, created_at, updated_at`,
+        [
+          expenseId,
+          req.user!.id,
+          cleanTitle,
+          numAmount,
+          cleanCategory,
+          cleanDate,
+          cleanNotes,
+          nextOrder,
+        ]
+      );
+
+      return formatExpense(insertRes.rows[0]);
+    });
+
+    res.status(201).json(newExpense);
+  } catch (err: any) {
+    console.error("Error creating expense:", err.message);
+    res.status(500).json({ error: "Failed to create expense record." });
   }
-
-  // Calculate order (append to end)
-  const maxOrder = db.expenses
-    .filter(e => e.userId === user.id)
-    .reduce((max, exp) => Math.max(max, exp.order), -1);
-
-  const newExpense: Expense = {
-    id: `exp_${crypto.randomUUID()}`,
-    userId: user.id,
-    title: title.trim(),
-    amount: Math.round(parsedAmount * 100) / 100,
-    category: (category && typeof category === "string" && category.trim()) || "Miscellaneous",
-    date: (date && typeof date === "string" && date.trim()) || new Date().toISOString().split("T")[0],
-    notes: (notes && typeof notes === "string") ? notes.trim() : "",
-    order: maxOrder + 1,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  };
-
-  db.expenses.push(newExpense);
-  saveDatabase();
-
-  res.status(201).json(newExpense);
 });
 
-// Reorder expenses (User can ONLY reorder their own expenses)
-// NOTE: Must be declared BEFORE "/api/expenses/:id" so Express doesn't treat "reorder" as an ID param
-app.put("/api/expenses/reorder", authenticateToken, (req, res) => {
-  const user = (req as any).user as User;
-  const { orderedIds } = req.body;
+// 12. Reorder Expenses (MUST be defined before /api/expenses/:id to avoid parameter shadowing)
+app.put("/api/expenses/reorder", authenticateToken, async (req: Request, res: Response) => {
+  const { orderedIds } = req.body || {};
 
   if (!Array.isArray(orderedIds)) {
     res.status(400).json({ error: "orderedIds must be an array of expense IDs." });
     return;
   }
 
-  const userExpenses = db.expenses.filter(e => e.userId === user.id);
-
-  // Validate format and ensure no empty or non-string IDs
-  for (const id of orderedIds) {
-    if (!id || typeof id !== "string") {
-      res.status(400).json({ error: "Invalid expense ID in orderedIds." });
-      return;
-    }
-  }
-
-  // Duplicate check
+  // Prevent duplicate IDs in the reorder request
   const uniqueIds = new Set(orderedIds);
   if (uniqueIds.size !== orderedIds.length) {
     res.status(400).json({ error: "Duplicate expense IDs in reorder request." });
     return;
   }
 
-  // Check unknown or unauthorized IDs
-  for (const id of orderedIds) {
-    const exp = db.expenses.find(e => e.id === id);
-    if (!exp) {
-      res.status(404).json({ error: `Expense with ID "${id}" not found.` });
-      return;
-    }
-    if (exp.userId !== user.id) {
-      res.status(403).json({ error: "Unauthorized: You attempted to reorder an expense that does not belong to you." });
-      return;
-    }
-  }
+  try {
+    const updatedExpenses = await withTransaction(async (client) => {
+      // Retrieve all existing expense IDs belonging to this user
+      const userExpensesRes = await client.query(
+        "SELECT id FROM expenses WHERE user_id = $1",
+        [req.user!.id]
+      );
+      const userExpenseIds = new Set(userExpensesRes.rows.map((r) => r.id));
 
-  // If user has expenses, check that all user expenses are present in the reorder list
-  if (userExpenses.length > 0 && orderedIds.length !== userExpenses.length) {
-    res.status(400).json({ error: "All user expenses must be included in the reorder request." });
-    return;
-  }
+      // Verify every ID in orderedIds belongs to the authenticated user
+      for (const id of orderedIds) {
+        if (!userExpenseIds.has(id)) {
+          throw {
+            status: 403,
+            message: "Unauthorized: You attempted to reorder an expense that does not belong to you.",
+          };
+        }
+      }
 
-  // Update orders deterministically without altering other attributes
-  orderedIds.forEach((id, index) => {
-    const exp = db.expenses.find(e => e.id === id);
-    if (exp && exp.userId === user.id) {
-      exp.order = index;
-    }
-  });
+      // Verify that all user expenses are present in the reorder request
+      if (orderedIds.length !== userExpenseIds.size) {
+        throw {
+          status: 400,
+          message: "Reorder list must contain all user expenses.",
+        };
+      }
 
-  saveDatabase();
+      // Update the expense_order for each record
+      for (let i = 0; i < orderedIds.length; i++) {
+        await client.query(
+          "UPDATE expenses SET expense_order = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3",
+          [i, orderedIds[i], req.user!.id]
+        );
+      }
 
-  const updatedExpenses = db.expenses
-    .filter(e => e.userId === user.id)
-    .sort((a, b) => a.order - b.order);
+      // Fetch and return the updated expenses in deterministic order
+      const finalRes = await client.query(
+        `SELECT id, user_id, title, amount, category, date, notes, expense_order, created_at, updated_at
+         FROM expenses
+         WHERE user_id = $1
+         ORDER BY expense_order ASC, created_at ASC`,
+        [req.user!.id]
+      );
 
-  res.json(updatedExpenses);
-});
-
-// Edit an expense (User can ONLY edit their own expense)
-app.put("/api/expenses/:id", authenticateToken, (req, res) => {
-  const user = (req as any).user as User;
-  const { id } = req.params;
-  const { title, amount, category, date, notes } = req.body;
-
-  const expenseIndex = db.expenses.findIndex(e => e.id === id);
-  if (expenseIndex === -1) {
-    res.status(404).json({ error: "Expense not found." });
-    return;
-  }
-
-  const existingExpense = db.expenses[expenseIndex];
-
-  // STRICT OWNERSHIP CHECK: User A must never be able to modify User B's information
-  if (existingExpense.userId !== user.id) {
-    res.status(403).json({ error: "Unauthorized: You do not own this expense." });
-    return;
-  }
-
-  if (title !== undefined) {
-    if (typeof title !== "string" || !title.trim()) {
-      res.status(400).json({ error: "Expense title cannot be empty." });
-      return;
-    }
-    existingExpense.title = title.trim();
-  }
-
-  if (amount !== undefined) {
-    const parsedAmount = Number(amount);
-    if (isNaN(parsedAmount) || parsedAmount <= 0) {
-      res.status(400).json({ error: "Expense amount must be greater than 0." });
-      return;
-    }
-    existingExpense.amount = Math.round(parsedAmount * 100) / 100;
-  }
-
-  if (category !== undefined && typeof category === "string") {
-    existingExpense.category = category.trim() || "Miscellaneous";
-  }
-
-  if (date !== undefined && typeof date === "string") {
-    existingExpense.date = date.trim();
-  }
-
-  if (notes !== undefined && typeof notes === "string") {
-    existingExpense.notes = notes.trim();
-  }
-
-  existingExpense.updatedAt = new Date().toISOString();
-  db.expenses[expenseIndex] = existingExpense;
-  saveDatabase();
-
-  res.json(existingExpense);
-});
-
-// Delete an expense (User can ONLY delete their own expense)
-app.delete("/api/expenses/:id", authenticateToken, (req, res) => {
-  const user = (req as any).user as User;
-  const { id } = req.params;
-
-  const expense = db.expenses.find(e => e.id === id);
-  if (!expense) {
-    res.status(404).json({ error: "Expense not found." });
-    return;
-  }
-
-  // STRICT OWNERSHIP CHECK
-  if (expense.userId !== user.id) {
-    res.status(403).json({ error: "Unauthorized: You do not own this expense." });
-    return;
-  }
-
-  db.expenses = db.expenses.filter(e => e.id !== id);
-  saveDatabase();
-
-  res.json({ success: true, message: "Expense deleted successfully." });
-});
-
-// --- PUBLIC ROUTES (ANYONE CAN VIEW WITHOUT LOGGING IN) ---
-
-// Public Profile: Fetch committee details and ordered expenses by username (case-insensitive)
-app.get("/api/public/committee/:username", (req, res) => {
-  const rawParam = req.params.username;
-  if (!rawParam) {
-    res.status(400).json({ error: "Username is required." });
-    return;
-  }
-
-  const decoded = decodeURIComponent(rawParam).trim();
-  const normalized = decoded.toLowerCase();
-
-  const profile = db.profiles.find(p => p.normalizedUsername === normalized);
-  if (!profile) {
-    res.status(404).json({
-      error: `No committee found with the name "${decoded}".`,
-      requestedUsername: decoded
+      return finalRes.rows.map(formatExpense);
     });
-    return;
-  }
 
-  // Get expenses in leader-chosen order
-  const expenses = db.expenses
-    .filter(e => e.userId === profile.userId)
-    .sort((a, b) => a.order - b.order)
-    .map(e => ({
-      id: e.id,
-      title: e.title,
-      amount: e.amount,
-      category: e.category,
-      date: e.date,
-      notes: e.notes,
-      order: e.order
-    }));
-
-  const totalSpent = expenses.reduce((sum, exp) => sum + exp.amount, 0);
-  const remainingBudget = profile.capital - totalSpent;
-
-  res.json({
-    profile: {
-      username: profile.username,
-      displayName: profile.displayName,
-      bio: profile.bio,
-      profileImage: profile.profileImage,
-      capital: profile.capital,
-      currency: profile.currency,
-      updatedAt: profile.updatedAt
-    },
-    expenses,
-    summary: {
-      totalExpensesCount: expenses.length,
-      capital: profile.capital,
-      totalSpent,
-      remainingBudget,
-      percentSpent: profile.capital > 0 ? Math.min(100, Math.round((totalSpent / profile.capital) * 100)) : 0
+    res.json(updatedExpenses);
+  } catch (err: any) {
+    if (err.status) {
+      res.status(err.status).json({ error: err.message });
+    } else {
+      console.error("Reorder expenses error:", err.message);
+      res.status(500).json({ error: "Failed to persist reordered expenses." });
     }
-  });
+  }
 });
 
-// Public: Real-time username availability check (used by frontend for live validation)
-app.get("/api/public/check-username/:username", (req, res) => {
-  const rawParam = req.params.username;
-  if (!rawParam) {
-    res.status(400).json({ available: false, error: "Username parameter is required." });
+// 13. Update Single Expense
+app.put("/api/expenses/:id", authenticateToken, async (req: Request, res: Response) => {
+  const expenseId = req.params.id;
+  const { title, amount, category, date, notes } = req.body || {};
+
+  try {
+    const existingRes = await query(
+      "SELECT * FROM expenses WHERE id = $1 AND user_id = $2",
+      [expenseId, req.user!.id]
+    );
+
+    if (existingRes.rows.length === 0) {
+      res.status(404).json({ error: "Expense not found." });
+      return;
+    }
+
+    const currentExpense = existingRes.rows[0];
+
+    const cleanTitle =
+      title !== undefined && typeof title === "string"
+        ? title.trim().slice(0, 200)
+        : currentExpense.title;
+    if (!cleanTitle) {
+      res.status(400).json({ error: "Expense description cannot be empty." });
+      return;
+    }
+
+    let numAmount = parseFloat(currentExpense.amount);
+    if (amount !== undefined) {
+      const parsed = typeof amount === "number" ? amount : parseFloat(amount);
+      if (isNaN(parsed) || parsed <= 0 || parsed > 1000000000) {
+        res.status(400).json({ error: "Please enter a valid positive expense amount." });
+        return;
+      }
+      numAmount = parsed;
+    }
+
+    const cleanCategory =
+      category !== undefined && typeof category === "string"
+        ? category.trim().slice(0, 100)
+        : currentExpense.category;
+
+    const cleanDate =
+      date !== undefined && typeof date === "string" && /^\d{4}-\d{2}-\d{2}/.test(date)
+        ? date.slice(0, 10)
+        : currentExpense.date;
+
+    const cleanNotes =
+      notes !== undefined && typeof notes === "string"
+        ? notes.trim().slice(0, 1000)
+        : currentExpense.notes;
+
+    const updateRes = await query(
+      `UPDATE expenses
+       SET title = $1,
+           amount = $2,
+           category = $3,
+           date = $4,
+           notes = $5,
+           updated_at = NOW()
+       WHERE id = $6 AND user_id = $7
+       RETURNING id, user_id, title, amount, category, date, notes, expense_order, created_at, updated_at`,
+      [cleanTitle, numAmount, cleanCategory, cleanDate, cleanNotes, expenseId, req.user!.id]
+    );
+
+    res.json(formatExpense(updateRes.rows[0]));
+  } catch (err: any) {
+    console.error("Error updating expense:", err.message);
+    res.status(500).json({ error: "Failed to update expense." });
+  }
+});
+
+// 14. Delete Expense
+app.delete("/api/expenses/:id", authenticateToken, async (req: Request, res: Response) => {
+  const expenseId = req.params.id;
+
+  try {
+    const deleted = await withTransaction(async (client) => {
+      const deleteRes = await client.query(
+        "DELETE FROM expenses WHERE id = $1 AND user_id = $2 RETURNING id",
+        [expenseId, req.user!.id]
+      );
+
+      if (deleteRes.rows.length === 0) {
+        return false;
+      }
+
+      // Re-index remaining user expenses to keep consecutive expense_order values
+      const remainingRes = await client.query(
+        "SELECT id FROM expenses WHERE user_id = $1 ORDER BY expense_order ASC, created_at ASC",
+        [req.user!.id]
+      );
+
+      for (let i = 0; i < remainingRes.rows.length; i++) {
+        await client.query(
+          "UPDATE expenses SET expense_order = $1 WHERE id = $2 AND user_id = $3",
+          [i, remainingRes.rows[i].id, req.user!.id]
+        );
+      }
+
+      return true;
+    });
+
+    if (!deleted) {
+      res.status(404).json({ error: "Expense not found." });
+      return;
+    }
+
+    res.json({ message: "Expense deleted successfully" });
+  } catch (err: any) {
+    console.error("Error deleting expense:", err.message);
+    res.status(500).json({ error: "Failed to delete expense." });
+  }
+});
+
+// 15. Public Committee Ledger Endpoint (Clean & Strict Security)
+app.get("/api/public/committee/:username", async (req: Request, res: Response) => {
+  if (!isDbConfigured()) {
+    res.status(503).json({ error: "Database not configured." });
     return;
   }
 
-  const trimmed = decodeURIComponent(rawParam).trim();
-
-  // Validate format first
-  const check = isValidUsername(trimmed);
-  if (!check.valid) {
-    res.json({ available: false, error: check.reason });
+  const rawUsername = req.params.username;
+  if (!rawUsername || typeof rawUsername !== "string") {
+    res.status(400).json({ error: "Invalid committee username." });
     return;
   }
 
-  const normalized = trimmed.toLowerCase();
-  const excludeUserId = req.query.excludeUserId as string | undefined;
+  const normalized = rawUsername.trim().toLowerCase();
 
-  const taken = db.profiles.some(p => {
-    if (excludeUserId && p.userId === excludeUserId) return false;
-    return p.normalizedUsername === normalized;
-  });
+  try {
+    // 1. Fetch profile by normalized username
+    const profileRes = await query(
+      `SELECT user_id, username, display_name, bio, profile_image, capital, currency, updated_at
+       FROM profiles
+       WHERE normalized_username = $1`,
+      [normalized]
+    );
 
-  if (taken) {
-    res.json({ available: false, error: `The committee name "${trimmed}" is already taken.` });
-  } else {
-    res.json({ available: true });
+    if (profileRes.rows.length === 0) {
+      res.status(404).json({ error: "Committee not found." });
+      return;
+    }
+
+    const p = profileRes.rows[0];
+    const capital = parseFloat(p.capital);
+    const currency = p.currency || "₹";
+
+    // 2. Fetch public expenses in deterministic persisted order
+    // (Only safe public fields: id, title, amount, category, date, notes, order)
+    const expensesRes = await query(
+      `SELECT id, title, amount, category, date, notes, expense_order
+       FROM expenses
+       WHERE user_id = $1
+       ORDER BY expense_order ASC, created_at ASC`,
+      [p.user_id]
+    );
+
+    const publicExpenses = expensesRes.rows.map((row) => {
+      let formattedDate: string;
+      if (row.date instanceof Date) {
+        formattedDate = row.date.toISOString().split("T")[0];
+      } else if (typeof row.date === "string") {
+        formattedDate = row.date.split("T")[0];
+      } else {
+        formattedDate = new Date().toISOString().split("T")[0];
+      }
+
+      return {
+        id: row.id,
+        title: row.title,
+        amount: parseFloat(row.amount),
+        category: row.category,
+        date: formattedDate,
+        notes: row.notes || "",
+        order: Number(row.expense_order ?? 0),
+      };
+    });
+
+    // 3. Compute ledger summaries
+    const totalExpensesCount = publicExpenses.length;
+    const totalSpent = publicExpenses.reduce((sum, e) => sum + e.amount, 0);
+    const remainingBudget = capital - totalSpent;
+    const percentSpent = capital > 0 ? Math.round((totalSpent / capital) * 100) : 0;
+
+    // Strict output without any secrets, emails, or internal hashes
+    res.json({
+      profile: {
+        username: p.username,
+        displayName: p.display_name || p.username,
+        bio: p.bio || "",
+        profileImage: p.profile_image || "",
+        capital,
+        currency,
+        updatedAt: p.updated_at,
+      },
+      expenses: publicExpenses,
+      summary: {
+        totalExpensesCount,
+        capital,
+        totalSpent,
+        remainingBudget,
+        percentSpent,
+      },
+    });
+  } catch (err: any) {
+    console.error("Error fetching public committee profile:", err.message);
+    res.status(500).json({ error: "Failed to retrieve committee ledger." });
   }
 });
 
-// Public List: Suggest committees (e.g. for search / 404 page)
-app.get("/api/public/committees", (_req, res) => {
-  const list = db.profiles.map(p => ({
-    username: p.username,
-    displayName: p.displayName,
-    bio: p.bio,
-    profileImage: p.profileImage,
-    capital: p.capital,
-    expensesCount: db.expenses.filter(e => e.userId === p.userId).length
-  }));
-  res.json(list);
-});
+// ----------------------------------------------------
+// FRONTEND SERVING & SERVER START
+// ----------------------------------------------------
 
-// --- VITE DEV & PROD SETUP ---
 async function startServer() {
-  loadDatabase();
-
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -791,14 +1050,22 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (_req, res) => {
+    app.get("*", (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Bappa Transaction Tracker Server running on http://localhost:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`Bappa Transaction Tracker server running on http://${HOST}:${PORT}`);
+    if (isDbConfigured()) {
+      console.log("PostgreSQL Database connected via DATABASE_URL.");
+    } else {
+      console.warn("DATABASE_URL is not set. Set DATABASE_URL in environment to enable database operations.");
+    }
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
+});
