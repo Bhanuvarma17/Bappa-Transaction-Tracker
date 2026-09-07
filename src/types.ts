@@ -61,3 +61,9 @@ export interface ChangePasswordResponse {
   message: string;
 }
 
+export interface CheckUsernameResponse {
+  available: boolean;
+  normalizedUsername?: string;
+  message?: string;
+}
+

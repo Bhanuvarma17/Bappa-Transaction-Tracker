@@ -9,6 +9,7 @@ import {
   isDbConfigured,
   query,
   withTransaction,
+  ensureSchema,
 } from "./server/db";
 import {
   hashPassword,
@@ -69,6 +70,18 @@ setInterval(async () => {
     console.error("Failed to clean up expired sessions:", err.message);
   }
 }, 60 * 60 * 1000);
+
+// Ensure PostgreSQL schema whenever DB is configured
+app.use("/api", async (req: Request, res: Response, next: NextFunction) => {
+  if (isDbConfigured()) {
+    try {
+      await ensureSchema();
+    } catch (err: any) {
+      console.error("Failed to ensure database schema:", err.message);
+    }
+  }
+  next();
+});
 
 // Helper to format an expense row from PostgreSQL to client structure
 function formatExpense(row: any) {
@@ -1055,10 +1068,15 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, HOST, () => {
+  app.listen(PORT, HOST, async () => {
     console.log(`Bappa Transaction Tracker server running on http://${HOST}:${PORT}`);
     if (isDbConfigured()) {
       console.log("PostgreSQL Database connected via DATABASE_URL.");
+      try {
+        await ensureSchema();
+      } catch (err: any) {
+        console.error("Initial schema setup error:", err.message);
+      }
     } else {
       console.warn("DATABASE_URL is not set. Set DATABASE_URL in environment to enable database operations.");
     }

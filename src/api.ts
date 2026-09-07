@@ -5,6 +5,7 @@ import {
   CommitteePublicData,
   PublicCommitteeSummary,
   ChangePasswordResponse,
+  CheckUsernameResponse,
 } from "./types";
 
 // No longer storing authentication tokens in localStorage; using secure HttpOnly cookies.
@@ -165,12 +166,11 @@ export const api = {
 
   async checkUsernameAvailability(
     username: string,
-    excludeUserId?: string
-  ): Promise<{ available: boolean; error?: string }> {
-    const encoded = encodeURIComponent(username.trim());
-    const query = excludeUserId ? `?excludeUserId=${encodeURIComponent(excludeUserId)}` : "";
-    return request<{ available: boolean; error?: string }>(
-      `/api/public/check-username/${encoded}${query}`
+    _excludeUserId?: string
+  ): Promise<CheckUsernameResponse> {
+    const encodedUsername = encodeURIComponent(username.trim());
+    return request<CheckUsernameResponse>(
+      `/api/auth/check-username?username=${encodedUsername}`
     );
   },
 };

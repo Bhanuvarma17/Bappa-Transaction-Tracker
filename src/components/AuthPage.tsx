@@ -85,11 +85,11 @@ export const AuthPage: React.FC<AuthPageProps> = ({
           setUsernameStatusMsg("Username is available!");
         } else {
           setUsernameStatus("taken");
-          setUsernameStatusMsg(res.error || "This committee name is already taken.");
+          setUsernameStatusMsg("This committee name is already taken.");
         }
-      } catch {
-        setUsernameStatus("idle");
-        setUsernameStatusMsg(null);
+      } catch (err: any) {
+        setUsernameStatus("invalid");
+        setUsernameStatusMsg(err.message || "Failed to check username availability.");
       }
     }, 600);
   };
